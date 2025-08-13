@@ -1,4 +1,6 @@
 import urllib
+import httpx
+import asyncio
 import urllib.robotparser
 
 class robotsTxt:
@@ -8,8 +10,9 @@ class robotsTxt:
         self.request_rate = request_rate
 
 
-def check_robots(link: str, robot_dict: dict):
+async def check_robots(client, link: str, robot_dict: dict):
     r_parser = urllib.robotparser.RobotFileParser()
+    robots_text = None
     
     parseResult = urllib.parse.urlparse(link)
     if parseResult.netloc.startswith("www."):
@@ -23,16 +26,30 @@ def check_robots(link: str, robot_dict: dict):
         return robot_dict[domainUrl]
     robotsUrl = parseResult.scheme + "://" + parseResult.netloc + "/robots.txt"
 
-    #grab the robots.txt
     try:
-        r_parser.set_url(robotsUrl)
-        r_parser.read()
-        print(f"Grabbed robots.txt for {link}")
+        headers = {'User-Agent': 'iSearch'}
+        response = await client.get(robotsUrl, follow_redirects=True, headers=headers)
     except Exception as e:
+        robot_dict[domainUrl] = None
         print(f"Robots.txt failed to be grabbed at {link} with error {e}")
-        return None
+        return 
 
-    if r_parser:    
+    if response.status_code == httpx.codes.OK:
+        print(f"Grabbed robots at {robotsUrl} with status code {response.status_code}")
+        robots_text = response.content
+    else:
+        robot_dict[domainUrl] = None
+        print(f"Robots.txt failed to be grabbed at {robotsUrl} with response code {response.status_code}")
+        return
+
+    if robots_text:
+        try:
+            lines = robots_text.decode("utf-8", errors="ignore").splitlines()
+            r_parser.parse(lines)
+        except Exception as e:
+            print(f"Robots.txt failed to be parsed at {robotsUrl} with error {e}")
+            return
+
         #get rate-limits to not get banned by websites
         crawl_delay = r_parser.crawl_delay("iSearch")
         request_rate = r_parser.request_rate("iSearch")

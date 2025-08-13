@@ -3,6 +3,7 @@ import time
 import urllib
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from lxml import etree
 
 import requests
 from bs4 import BeautifulSoup as soup
@@ -10,7 +11,7 @@ from bs4 import BeautifulSoup as soup
 from db import connect_to_db, create_page
 from robots import check_robots, robotsTxt
 from util import unique_queue, to_domain
-
+#also cchardet
 
 def get_response(startLink: str, queue: unique_queue):
     #send request
@@ -21,7 +22,7 @@ def get_response(startLink: str, queue: unique_queue):
     except Exception as e:
         queue.popleft()
         print("Exception raised in get content:", e)
-        return None
+        return 
 
     if response.ok:
         print(f"Grabbed {startLink} with status code {response.status_code}{30 * " "}")
@@ -73,7 +74,7 @@ def handle_limits(response, current_link, robot_rules, domains):
 
 
 def parse_content(start_link, response, queue, session) -> None:
-    content = soup(response.content, 'html.parser')     
+    content = soup(response.content, "lxml")     
 
     if not content:
         return None
@@ -156,8 +157,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    t = time.time()
+    t = time.perf_counter()
 
     main()
 
-    print(f"{time.time() - t} seconds executed")
+    print(f"{time.perf_counter() - t} seconds executed")
+    
