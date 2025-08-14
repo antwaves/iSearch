@@ -35,11 +35,9 @@ async def check_robots(client, link: str, robot_dict: dict):
         return 
 
     if response.status_code == httpx.codes.OK:
-        print(f"Grabbed robots at {robotsUrl} with status code {response.status_code}")
         robots_text = response.content
     else:
         robot_dict[domainUrl] = None
-        print(f"Robots.txt failed to be grabbed at {robotsUrl} with response code {response.status_code}")
         return
 
     if robots_text:

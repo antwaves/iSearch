@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup as soup
 from util import unique_queue, to_domain
 from db import connect_to_db, create_page
 from robots import check_robots, robotsTxt
+import yappi
 
 class webcrawler:
     def __init__(self, client, workers):
@@ -24,14 +25,21 @@ class webcrawler:
         self.domain_robot_rules = {}
 
         self.crawled = 0
-        self.max_crawl = 100
+        self.max_crawl = 1000
+
+        self.shuffle_count = 100
+
+        self.last_crawl = None
 
         self.db_session = connect_to_db()
         print("Connected to db!")
 
+
     async def add_links(self, urls):
         for url in urls:
-            await self.link_queue.put(url)
+            self.link_queue.put(url)
+        
+        await self.link_queue.shuffle()
         
 
     async def run_crawler(self):
@@ -45,7 +53,13 @@ class webcrawler:
         while True:
             if self.crawled <= self.max_crawl:
                 try:
+                    if self.shuffle_count == 0 or self.link_queue.queue.empty():
+                        self.shuffle_count = 100
+                        await self.link_queue.shuffle()
+
+                    self.shuffle_count -= 1
                     await self.get_page(worker_num)
+
                 except asyncio.CancelledError:
                     break
                 except asyncio.queues.QueueShutDown:
@@ -89,7 +103,8 @@ class webcrawler:
             
             await self.add_pages(response, url)
         except Exception as e:
-            print("Exception in get page:", e)
+            print("Exception in get page:", e, url)
+
 
         self.crawled += 1
         self.link_queue.queue.task_done()
@@ -110,53 +125,43 @@ class webcrawler:
             if link[-1] == "/":
                 link = link[:-1]
             
+            if "mailto@" in link or "mailto:" in link:
+                continue
+            
             if "https://" in link:
                 outlinks.append(link)
-                await self.link_queue.put(link)
+                self.link_queue.put(link)
             else:
                 link = urllib.parse.urljoin(url, link)
                 outlinks.append(link)
-                await self.link_queue.put(link)
-
-        headers = []
-
-        try:
-            title = content.title.text
-            if title:
-                for word in title.split(" "):
-                    if len(word) > 1:
-                        headers.append(word)
-        except Exception as e:
-            pass
-
-        content_headers = content.find_all(re.compile('^h[1-6]'))
-        for header in content_headers:
-            for word in header.text.split(" "):
-                if len(word) > 1:
-                    headers.append(word)
+                self.link_queue.put(link)
+        
+    
         
         text = content.get_text()
-
-        create_page(self.db_session, url, text, headers, outlinks)
+        create_page(self.db_session, url, text, outlinks)
 
 
     def handle_limits(self, response, url, robot_rules):
         can_request_at = None
 
         if response.status_code == 429 or response.status_code == 503:
-            retry_after = response.headers["Retry-After"]
+            if response.headers:
+                retry_after = response.headers["Retry-After"]
 
-            if retry_after:
-                if retry_after.isdigit():
-                    time_delta = timedelta(seconds=int(retry_after))
-                    can_request_at = datetime.now(timezone.utc) + time_delta
+                if retry_after:
+                    if retry_after.isdigit():
+                        time_delta = timedelta(seconds=int(retry_after))
+                        can_request_at = datetime.now(timezone.utc) + time_delta
+                    else:
+                        try:
+                            can_request_at = parsedate_to_datetime(retry_after)
+                        except (TypeError, ValueError):
+                            can_request_at = datetime.now(timezone.utc) + timedelta(seconds=5)
                 else:
-                    try:
-                        can_request_at = parsedate_to_datetime(retry_after)
-                    except (TypeError, ValueError):
-                        can_request_at = datetime.now(timezone.utc) + timedelta(seconds=5)
+                    can_request_at = datetime.now(timezone.utc) + timedelta(seconds=5)
             else:
-                can_request_at = datetime.now(timezone.utc) + timedelta(seconds=5)
+                    can_request_at = datetime.now(timezone.utc) + timedelta(seconds=5)
 
         elif robot_rules and (robot_rules.crawl_delay or robot_rules.request_rate):
             crawl_delay = 0 if robot_rules.crawl_delay == None else robot_rules.crawl_delay
@@ -168,21 +173,21 @@ class webcrawler:
             else:
                 wait_time = request_rate
         
-            if wait_time < 0.1:
-                wait_time = 0.1
+            if wait_time < 0.2:
+                wait_time = 0.2
 
             wait_milliseconds = wait_time * 100
             can_request_at = datetime.now(timezone.utc) + timedelta(milliseconds=wait_milliseconds)
         
         else:
-            can_request_at = datetime.now(timezone.utc) + timedelta(milliseconds=100)
+            can_request_at = datetime.now(timezone.utc) + timedelta(milliseconds=200)
 
         domain_url = to_domain(url)
         self.domain_wait_times[domain_url] = can_request_at
 
 
 async def main():
-    start_urls = ["https://en.wikipedia.org/wiki/Category:Wikipedia_vital_articles"]
+    start_urls = ["https://nodejs.org/en"]
 
     workers = 15
 

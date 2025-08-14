@@ -35,7 +35,6 @@ def connect_to_db():
         page_id: Mapped[int] = mapped_column(primary_key=True, index=True, unique=True)
         page_url: Mapped[str] = mapped_column(TEXT, unique=True)
         page_content: Mapped[str] = mapped_column(TEXT, nullable=True) 
-        page_headers: Mapped[list[str]] = mapped_column(ARRAY(TEXT), nullable=True)
         inlinks: Mapped[list[str]] = mapped_column(ARRAY(TEXT))
         outlinks: Mapped[list[str]] = mapped_column(ARRAY(TEXT), nullable=True)
 
@@ -48,14 +47,14 @@ def connect_to_db():
     return session
 
 
-def create_page(session, link, content, headers, outlinks):
+def create_page(session, link, content, outlinks):
     page_inlinks =  [row[0] for row in (session.query(Page.page_url).filter(sa.and_(Page.outlinks.contains([link]), Page.page_url != link)).all())]
 
     #print(page_inlinks)
     #existing_page = session.query(Page).filter(Page.page_url.contains(link)).first()
 
-    ins = insert(Page).values(page_url=link, page_content=content, page_headers=headers, inlinks=[], outlinks=outlinks). \
-    on_conflict_do_update(index_elements=["page_url"], set_={"page_content":content, "page_headers": headers, "inlinks":page_inlinks, "outlinks":outlinks})
+    ins = insert(Page).values(page_url=link, page_content=content, inlinks=[], outlinks=outlinks). \
+    on_conflict_do_update(index_elements=["page_url"], set_={"page_content":content, "inlinks":page_inlinks, "outlinks":outlinks})
 
     try:
         session.execute(ins)
