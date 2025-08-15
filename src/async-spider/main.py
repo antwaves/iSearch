@@ -4,7 +4,7 @@ import urllib
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from lxml import etree
-import httpx
+import aiohttp
 import asyncio
 
 import requests
@@ -13,12 +13,17 @@ from bs4 import BeautifulSoup as soup
 from util import unique_queue, to_domain
 from db import connect_to_db, create_page
 from robots import check_robots, robotsTxt
-import yappi
+
+#and cchardet and pip-system-certs
+
+
+t = time.perf_counter()
 
 class webcrawler:
     def __init__(self, client, workers):
         self.client = client
         self.link_queue = unique_queue()
+        self.loop = asyncio.get_running_loop()
     
         self.workers = workers
         self.domain_wait_times = {}
@@ -27,8 +32,7 @@ class webcrawler:
         self.crawled = 0
         self.max_crawl = 1000
 
-        self.shuffle_count = 100
-
+        self.shuffle_count = 120
         self.last_crawl = None
 
         self.db_session = connect_to_db()
@@ -54,7 +58,12 @@ class webcrawler:
             if self.crawled <= self.max_crawl:
                 try:
                     if self.shuffle_count == 0 or self.link_queue.queue.empty():
-                        self.shuffle_count = 100
+                        self.shuffle_count = 120
+                        self.link_queue.seen_pages.clear()
+
+                        if self.crawled > 1:
+                            print("Crawled", self.crawled)
+                            print("Time elapsed: ", time.perf_counter() - t)
                         await self.link_queue.shuffle()
 
                     self.shuffle_count -= 1
@@ -73,8 +82,7 @@ class webcrawler:
     async def get_page(self, worker_num):
         url = await self.link_queue.queue.get()
 
-        robot_rules = await check_robots(self.client, url, self.domain_robot_rules)
-        
+        robot_rules = await check_robots(self.client, url, self.domain_robot_rules, self.loop)
         if robot_rules and (not robot_rules.parser.can_fetch("*", url)):
             self.link_queue.queue.task_done()
             return
@@ -92,18 +100,31 @@ class webcrawler:
         try:
             headers = {'User-Agent': 'iSearch'}
             now = datetime.now(timezone.utc)
-            response = await self.client.get(url, follow_redirects=True, headers=headers)
-            self.handle_limits(response, url, robot_rules)
+
+            async with self.client.get(url, allow_redirects=True, headers=headers) as response:
+                content_type = response.headers.get('Content-Type')
+                content_lang = response.headers.get('Content-Language')
+
+                if content_type and ("text/html" not in content_type):
+                    self.link_queue.queue.task_done()
+                    return
+                
+                elif content_lang and ("en" not in content_lang):
+                    self.link_queue.queue.task_done()
+                    return
+
+                self.handle_limits(response, url, robot_rules)
+                sucess_color, fail_color, reset_foreground = "\033[32m", "\033[31m", "\033[0m"
+                if response.ok:
+                    print(f"{sucess_color}Worker number {worker_num} grabbed {url} with status code {response.status} at {now}{reset_foreground}")
+                else:
+                    print(f"{fail_color}Worker number {worker_num} failed to grab {url} with response code {response.status} at {now}{reset_foreground}")
         
-            sucess_color, fail_color, reset_foreground = "\033[32m", "\033[31m", "\033[0m"
-            if response.status_code == httpx.codes.OK:
-                print(f"{sucess_color}Worker number {worker_num} grabbed {url} with status code {response.status_code} at {now}{reset_foreground}")
-            else:
-                print(f"{fail_color}Worker number {worker_num} failed to grab {url} with response code {response.status_code} at {now}{reset_foreground}")
-            
-            await self.add_pages(response, url)
+                await self.add_pages(response, url)
         except Exception as e:
-            print("Exception in get page:", e, url)
+            with open("log.txt", "a") as f:
+                f.write("get_page threw an error:")
+                f.write(str(e) + "  -  " + str(url) + '  -  ' + str(domain) +'\n')
 
 
         self.crawled += 1
@@ -111,7 +132,7 @@ class webcrawler:
 
 
     async def add_pages(self, response, url):
-        content = soup(response.content, "lxml")     
+        content = await self.loop.run_in_executor(None, soup, await response.text(), "lxml")
 
         if not content:
             return 
@@ -136,8 +157,6 @@ class webcrawler:
                 outlinks.append(link)
                 self.link_queue.put(link)
         
-    
-        
         text = content.get_text()
         create_page(self.db_session, url, text, outlinks)
 
@@ -145,9 +164,10 @@ class webcrawler:
     def handle_limits(self, response, url, robot_rules):
         can_request_at = None
 
-        if response.status_code == 429 or response.status_code == 503:
+        if response.status == 429 or response.status== 503:
             if response.headers:
-                retry_after = response.headers["Retry-After"]
+
+                retry_after = response.headers.get("Retry-After")
 
                 if retry_after:
                     if retry_after.isdigit():
@@ -189,11 +209,12 @@ class webcrawler:
 async def main():
     start_urls = ["https://nodejs.org/en"]
 
-    workers = 15
-
+    workers = 30
     start = time.perf_counter()
 
-    async with httpx.AsyncClient() as client:
+    timeout = aiohttp.ClientTimeout(total=5)
+
+    async with aiohttp.ClientSession(timeout=timeout, max_line_size=8190 * 2, max_field_size=8190 * 2) as client:
         crawler = webcrawler(client, workers)
         await crawler.add_links(start_urls)
         await crawler.run_crawler()

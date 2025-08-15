@@ -53,15 +53,15 @@ def create_page(session, link, content, outlinks):
     #print(page_inlinks)
     #existing_page = session.query(Page).filter(Page.page_url.contains(link)).first()
 
-    ins = insert(Page).values(page_url=link, page_content=content, inlinks=[], outlinks=outlinks). \
+    ins = insert(Page).values(page_url=link, page_content=content, inlinks=page_inlinks, outlinks=outlinks). \
     on_conflict_do_update(index_elements=["page_url"], set_={"page_content":content, "inlinks":page_inlinks, "outlinks":outlinks})
 
     try:
         session.execute(ins)
         session.commit()
     except Exception as e: 
-        session.flush()
         session.rollback()
+        session.flush()
 
         print(f"Page failed to be added with exception:", e)
     

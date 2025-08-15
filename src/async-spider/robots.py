@@ -1,7 +1,9 @@
 import urllib
-import httpx
+import aiohttp
 import asyncio
 import urllib.robotparser
+import tldextract
+
 
 class robotsTxt:
     def __init__(self, parser, crawl_delay, request_rate):
@@ -10,7 +12,7 @@ class robotsTxt:
         self.request_rate = request_rate
 
 
-async def check_robots(client, link: str, robot_dict: dict):
+async def check_robots(client, link: str, robot_dict: dict, execute_loop):
     r_parser = urllib.robotparser.RobotFileParser()
     robots_text = None
     
@@ -28,35 +30,35 @@ async def check_robots(client, link: str, robot_dict: dict):
 
     try:
         headers = {'User-Agent': 'iSearch'}
-        response = await client.get(robotsUrl, follow_redirects=True, headers=headers)
+        async with client.get(robotsUrl, allow_redirects=True, headers=headers) as response:            
+            if response.ok:
+                robots_text = await response.text()
+            else:
+                robot_dict[domainUrl] = None
+                return
+
+            if robots_text:
+                try:
+                    lines = robots_text.splitlines()
+                    await execute_loop.run_in_executor(None, r_parser.parse, lines)
+                except Exception as e:
+                    with open("log.txt", "a") as f:
+                        f.write("check_robots threw an error: ")
+                        f.write(str(e) + '\n')
+                    return
+
+                #get rate-limits to not get banned by websites
+                crawl_delay = r_parser.crawl_delay("iSearch")
+                request_rate = r_parser.request_rate("iSearch")
+
+                if request_rate:
+                    request_rate = request_rate.seconds / request_rate.requests
+
+                robot_dict[domainUrl] = robotsTxt(r_parser, crawl_delay, request_rate)
+                return robot_dict[domainUrl]
+            else:
+                robot_dict[domainUrl] = None
+                return 
     except Exception as e:
-        robot_dict[domainUrl] = None
-        print(f"Robots.txt failed to be grabbed at {link} with error {e}")
-        return 
-
-    if response.status_code == httpx.codes.OK:
-        robots_text = response.content
-    else:
-        robot_dict[domainUrl] = None
-        return
-
-    if robots_text:
-        try:
-            lines = robots_text.decode("utf-8", errors="ignore").splitlines()
-            r_parser.parse(lines)
-        except Exception as e:
-            print(f"Robots.txt failed to be parsed at {robotsUrl} with error {e}")
-            return
-
-        #get rate-limits to not get banned by websites
-        crawl_delay = r_parser.crawl_delay("iSearch")
-        request_rate = r_parser.request_rate("iSearch")
-
-        if request_rate:
-            request_rate = request_rate.seconds / request_rate.requests
-
-        robot_dict[domainUrl] = robotsTxt(r_parser, crawl_delay, request_rate)
-        return robot_dict[domainUrl]
-    else:
         robot_dict[domainUrl] = None
         return 

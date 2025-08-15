@@ -1,17 +1,17 @@
-import urllib
+import time
 from collections import deque   
 import asyncio
 import tldextract
 
 def to_domain(link: str):
     parse = tldextract.extract(link)
-    return parse.top_domain_under_public_suffix
-
+    domain = parse.fqdn
+    return domain
 
 class unique_queue:
     def __init__(self):
-        self.queue = asyncio.Queue()
-        self.shuffle_queue = deque()
+        self.queue = asyncio.Queue(maxsize=25000)
+        self.shuffle_queue = deque(maxlen=25000)
         self.seen_pages = set()
     
     def put(self, item: str) -> None:
@@ -21,36 +21,29 @@ class unique_queue:
             
 
     async def shuffle(self):
+        t = time.perf_counter()
         self.shuffle_queue.extend(self.queue._queue)
         self.queue._queue = deque()
 
-        if len(self.shuffle_queue) > 0:
-            print("Shuffling")
+        domains = set()
+        domain_pages = {}
 
-            current_id = 0
-            domains = set()
-            domain_ids = {}
-            domain_pages = {}
+        domain_pages = {}
+        for link in self.shuffle_queue:
+            domain = to_domain(link)
+            domain_pages.setdefault(domain, deque()).append(link)
 
-            for link in self.shuffle_queue:
-                domain = to_domain(link)
-
-                if domain not in domains:
-                    domains.add(domain)
-                    domain_ids[domain] = current_id
-                    current_id += 1
-
-                domain_pages.setdefault(domain_ids[domain], deque()).append(link)
-
-            keys = list(domain_pages.keys())
-            while len(keys) > 0:
-                for key in keys:   
-                    queue = domain_pages[key]
-
-                    if len(queue) > 0:
-                        await self.queue.put(queue[0])
-                        queue.popleft()
-
-                keys = [key for key in domain_pages.keys() if len(domain_pages[key]) > 0]
         
-            self.shuffle_queue.clear()
+        remaining_domains = list(domain_pages.keys())
+        while remaining_domains:
+            temp = []
+            for domain in remaining_domains:
+                queue = domain_pages[domain]
+
+                if queue:
+                    await self.queue.put(queue.popleft())
+                
+                if queue:
+                    temp.append(domain)
+            remaining_domains = temp        
+        self.shuffle_queue.clear()
