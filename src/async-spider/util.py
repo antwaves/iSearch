@@ -2,7 +2,9 @@ import time
 from collections import deque   
 import asyncio
 import tldextract
+from functools import lru_cache
 
+@lru_cache(maxsize=5000)
 def to_domain(link: str):
     parse = tldextract.extract(link)
     domain = parse.fqdn

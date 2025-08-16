@@ -3,14 +3,18 @@ import os
 from urllib.parse import quote_plus
 
 import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import create_async_engine
 from dotenv import load_dotenv
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import ARRAY, TEXT, insert
 from sqlalchemy.orm import (Mapped, declarative_base, mapped_column,
                             sessionmaker)
 from sqlalchemy.sql import func
 
+#asyncpg too
 
-def connect_to_db():
+async def connect_to_db():
     '''Loads database and tables, returns a session object'''
 
     load_dotenv()
@@ -20,11 +24,10 @@ def connect_to_db():
     port = os.getenv("PORT")
     dbname = os.getenv("DBNAME")
 
-    url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
-    engine = sa.create_engine(url)
+    url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
+    engine = create_async_engine(url)
 
-    db = engine
-    Sesssion = sessionmaker(bind=db)
+    Session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     Base = declarative_base()
 
     global Page
@@ -40,28 +43,24 @@ def connect_to_db():
 
         def __repr__(self) -> str:
             return f"{self.page_url}"
-        
-    Base.metadata.create_all(db)
-    session = Sesssion()
 
-    return session
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    return Session
 
 
-def create_page(session, link, content, outlinks):
-    page_inlinks =  [row[0] for row in (session.query(Page.page_url).filter(sa.and_(Page.outlinks.contains([link]), Page.page_url != link)).all())]
-
-    #print(page_inlinks)
-    #existing_page = session.query(Page).filter(Page.page_url.contains(link)).first()
+async def create_page(session, link, content, outlinks):
+    result =  await session.execute(select(Page.page_url).where(Page.outlinks.contains([link])))
+    page_inlinks = [row[0] for row in result.fetchall()]
 
     ins = insert(Page).values(page_url=link, page_content=content, inlinks=page_inlinks, outlinks=outlinks). \
     on_conflict_do_update(index_elements=["page_url"], set_={"page_content":content, "inlinks":page_inlinks, "outlinks":outlinks})
 
     try:
-        session.execute(ins)
-        session.commit()
+        await session.execute(ins)
     except Exception as e: 
-        session.rollback()
-        session.flush()
-
+        await session.rollback()
         print(f"Page failed to be added with exception:", e)
     

@@ -40,7 +40,7 @@ async def check_robots(client, link: str, robot_dict: dict, execute_loop):
             if robots_text:
                 try:
                     lines = robots_text.splitlines()
-                    await execute_loop.run_in_executor(None, r_parser.parse, lines)
+                    r_parser.parse(lines)
                 except Exception as e:
                     with open("log.txt", "a") as f:
                         f.write("check_robots threw an error: ")
