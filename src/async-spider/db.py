@@ -14,7 +14,7 @@ from sqlalchemy.sql import func
 
 #asyncpg too
 
-async def connect_to_db():
+async def connect_to_db(request_pool_size):
     '''Loads database and tables, returns a session object'''
 
     load_dotenv()
@@ -25,7 +25,7 @@ async def connect_to_db():
     dbname = os.getenv("DBNAME")
 
     url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
-    engine = create_async_engine(url)
+    engine = create_async_engine(url, pool_size=request_pool_size)
 
     Session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     Base = declarative_base()
@@ -63,4 +63,5 @@ async def create_page(session, link, content, outlinks):
     except Exception as e: 
         await session.rollback()
         print(f"Page failed to be added with exception:", e)
+        return e
     

@@ -45,8 +45,7 @@ async def check_robots(client, link: str, robot_dict: dict, execute_loop):
                     with open("log.txt", "a") as f:
                         f.write("check_robots threw an error: ")
                         f.write(str(e) + '\n')
-                    return
-
+                        
                 #get rate-limits to not get banned by websites
                 crawl_delay = r_parser.crawl_delay("iSearch")
                 request_rate = r_parser.request_rate("iSearch")
@@ -61,4 +60,3 @@ async def check_robots(client, link: str, robot_dict: dict, execute_loop):
                 return 
     except Exception as e:
         robot_dict[domainUrl] = None
-        return 
