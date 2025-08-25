@@ -1,4 +1,5 @@
 import time
+import janus
 from collections import deque   
 import asyncio
 import tldextract
@@ -10,20 +11,57 @@ def to_domain(link: str):
     domain = parse.fqdn
     return domain
 
+
+class queue:
+    def __init__(self):
+        self.queue = janus.Queue()
+    
+    async def put(self, item: str) -> None:
+        await self.queue.async_q.put(item)
+
+    async def get(self):
+        item = await self.queue.async_q.get()
+        return item
+
+    def task_done(self) -> None:
+        self.queue.async_q.task_done()
+    
+    async def close(self) -> None:
+        await queue.aclose()
+
+
 class unique_queue:
     def __init__(self):
         self.queue = asyncio.Queue(maxsize=25000)
         self.shuffle_queue = deque(maxlen=25000)
         self.seen_pages = set()
     
+
     def put(self, item: str) -> None:
         if item not in self.seen_pages:
             self.seen_pages.add(item)
             self.shuffle_queue.append(item)
-            
+    
+
+    async def get(self) -> None:
+        return await self.queue.get()
+
+
+    def task_done(self) -> None:
+        self.queue.task_done()
+
+
+    def empty(self) -> bool:
+        return self.queue.empty()
+    
+    
+    def length(self) -> int:
+        return len(self.queue._queue)
+
 
     async def shuffle(self):
-        t = time.perf_counter()
+        print("Shuffling")
+        
         self.shuffle_queue.extend(self.queue._queue)
         self.queue._queue = deque()
 

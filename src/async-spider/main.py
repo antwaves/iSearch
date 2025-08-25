@@ -3,19 +3,18 @@ import time
 import urllib
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from concurrent.futures import ThreadPoolExecutor
 import aiohttp
 import asyncio
 
 import requests
 from selectolax.parser import HTMLParser
 
-from util import unique_queue, to_domain
-from db import connect_to_db, create_page
+from util import unique_queue, queue, to_domain
+from db import connect_to_db, create_page, db_worker
 from robots import check_robots, robotsTxt
+from page_parser import page_info, parse_worker
 
 #and cchardet and pip-system-certs
-
 
 t = time.perf_counter()
 
@@ -23,8 +22,11 @@ class webcrawler:
     def __init__(self, client, workers):
         self.client = client
         self.link_queue = unique_queue()
+        self.parse_queue = queue()
+        self.db_queue = queue()
     
         self.workers = workers
+
         self.domain_wait_times = {}
         self.domain_robot_rules = {}
 
@@ -32,11 +34,9 @@ class webcrawler:
         self.max_crawl = 10000
         self.max_response_size = 5 * 1024 * 1024  
 
-        self.shuffle_count = 120
+        self.shuffle_count = 100
         self.last_crawl = None
-        
-        self.loop = asyncio.get_running_loop()
-        self.pool = ThreadPoolExecutor()
+
         print("Connected to db!")
 
 
@@ -46,12 +46,33 @@ class webcrawler:
         
         await self.link_queue.shuffle()
         
+    
+    async def shuffle_handler(self):
+        while True:
+            try:
+                if self.crawled < 50:
+                    await asyncio.sleep(0.1)
+                    await self.link_queue.shuffle()
+                else:
+                    await asyncio.sleep(5)
+                    await self.link_queue.shuffle()
+            except asyncio.CancelledError:
+                break
 
-    async def run_crawler(self, session):
-        workers = [asyncio.create_task(self.worker(session, worker_num)) 
+
+    async def run_crawler(self, client_session):
+        workers = [asyncio.create_task(self.worker(client_session, worker_num)) 
                     for worker_num in range(self.workers)]
+        
+       # workers = workers + [asyncio.create_task(db_worker(self.db_queue)) for _ in range(self.workers)]
+        
+        workers.append(asyncio.create_task(parse_worker(self.parse_queue, self.link_queue, self.db_queue)))
+        workers.append(asyncio.create_task(self.shuffle_handler()))
 
-        await asyncio.gather(*workers)
+        try:
+            await asyncio.gather(*workers)
+        except asyncio.CancelledError:
+            pass
 
 
     async def worker(self, session_maker, worker_num):
@@ -60,32 +81,23 @@ class webcrawler:
             while True:
                 if self.crawled <= self.max_crawl:
                     try:
-                        if self.crawled % self.shuffle_count == 0 or self.link_queue.queue.empty():
-                            if self.crawled > 1:
-                                print("Crawled", self.crawled)
-                                print("Time elapsed: ", time.perf_counter() - t)
-                            await self.link_queue.shuffle()
-                            await session.commit()
-
                         await self.get_page(session, worker_num)
                     except asyncio.CancelledError:
                         break
-                    except asyncio.queues.QueueShutDown:
-                        break
                 else:
-                    self.link_queue.queue.shutdown(immediate=True)
-                    print(f"Worker number {worker_num} exited.")
+                    for task in asyncio.all_tasks():
+                        task.cancel()
                     break
         
 
     async def get_page(self, session, worker_num):
-        url = await self.link_queue.queue.get()
+        url = await self.link_queue.get()
         domain = to_domain(url)
 
         try:
-            robot_rules = await check_robots(self.client, url, self.domain_robot_rules, self.loop)
+            robot_rules = await check_robots(self.client, url, self.domain_robot_rules)
             if robot_rules and (not robot_rules.parser.can_fetch("*", url)):
-                self.link_queue.queue.task_done()
+                self.link_queue.task_done()
                 return
 
             if domain in self.domain_wait_times.keys():
@@ -94,6 +106,7 @@ class webcrawler:
                 sleep_seconds = sleep_time.total_seconds()
 
                 if sleep_seconds > 0:
+                    print(f"Worker {worker_num} sleeping for {sleep_seconds}")
                     await asyncio.sleep(sleep_seconds)
 
             headers = {'User-Agent': 'iSearch'}
@@ -105,59 +118,37 @@ class webcrawler:
                     content_lang = response.headers.get('Content-Language')
 
                     if content_type and ("text/html" not in content_type):
-                        self.link_queue.queue.task_done()
+                        print("Skipping due to not being html")
+                        self.link_queue.task_done()
                         return
-                    
-                    elif content_lang and ("en" not in content_lang):
-                        self.link_queue.queue.task_done()
+
+                    if content_lang and ("en" not in content_lang):
+                        print("Skipping due to not being en")
+                        self.link_queue.task_done()
                         return
+
+                    self.handle_limits(response, url, robot_rules)
+
 
                     sucess_color, fail_color, reset_foreground = "\033[32m", "\033[31m", "\033[0m"
                     if response.ok:
                         print(f"{sucess_color}Worker number {worker_num} grabbed {url} with status code {response.status} at {now}{reset_foreground}")
                     else:
                         print(f"{fail_color}Worker number {worker_num} failed to grab {url} with response code {response.status} at {now}{reset_foreground}")
-            
-                    self.handle_limits(response, url, robot_rules)
-                    await self.add_pages(response, url, session)
+                                
+                    text = await response.text()
+                    await self.parse_queue.put(page_info(url, text, session))
 
         except Exception as e:
             with open("log.txt", "a") as f:
                 f.write("get_page threw an error:")
                 f.write(str(e) + "  -  " + str(url) + '  -  ' + str(domain) +'\n')
+            self.link_queue.task_done()
             return 
 
-        self.crawled += 1
-        self.link_queue.queue.task_done()
-
-
-    async def add_pages(self, response, url, session):
-        tree = await self.loop.run_in_executor(self.pool, HTMLParser, await response.text())
-        if not tree:
-            return 
-
-        outlinks = []
-        for node in tree.css("a"):
-            link = node.attributes.get("href")
-            if not link:
-                continue
-
-            if link[-1] == "/":
-                link = link[:-1]
-            
-            if "mailto@" in link or "mailto:" in link:
-                continue
-            
-            if "https://" in link:
-                outlinks.append(link)
-                self.link_queue.put(link)
-            else:
-                link = urllib.parse.urljoin(url, link)
-                outlinks.append(link)
-                self.link_queue.put(link)
-        
-        text = tree.root.text()
-        await create_page(session, url, text, outlinks)
+        finally:
+            self.crawled += 1
+            self.link_queue.task_done()
 
 
     def handle_limits(self, response, url, robot_rules):
@@ -168,7 +159,7 @@ class webcrawler:
                 retry_after = response.headers.get("Retry-After")
 
                 if retry_after:
-                    print(retry_after)
+                    print("Retry After:", retry_after)
                     if retry_after.isdigit():
                         time_delta = timedelta(seconds=int(retry_after))
                         can_request_at = datetime.now(timezone.utc) + time_delta
@@ -195,7 +186,7 @@ class webcrawler:
             if wait_time < 0.2:
                 wait_time = 0.2
 
-            wait_milliseconds = wait_time * 100
+            wait_milliseconds = wait_time * 1000
             can_request_at = datetime.now(timezone.utc) + timedelta(milliseconds=wait_milliseconds)
     
         else:
@@ -211,10 +202,11 @@ async def main():
     workers = 30
     start = time.perf_counter()
 
-    timeout = aiohttp.ClientTimeout(total=10)
+    timeout = aiohttp.ClientTimeout(total=6)
     Session = await connect_to_db(workers)
 
-    async with aiohttp.ClientSession(timeout=timeout, max_line_size=8190 * 2, max_field_size=8190 * 2) as client:
+    conn = aiohttp.TCPConnector(limit_per_host=60)
+    async with aiohttp.ClientSession(timeout=timeout, connector=conn, max_line_size=8190 * 2, max_field_size=8190 * 2) as client:
         crawler = webcrawler(client, workers)
         await crawler.add_links(start_urls)
         await crawler.run_crawler(Session)

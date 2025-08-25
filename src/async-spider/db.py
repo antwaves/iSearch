@@ -1,4 +1,5 @@
 import datetime
+import asyncio
 import os
 from urllib.parse import quote_plus
 
@@ -13,6 +14,15 @@ from sqlalchemy.orm import (Mapped, declarative_base, mapped_column,
 from sqlalchemy.sql import func
 
 #asyncpg too
+
+
+class db_info:
+    def __init__(self, db_session, url, content, outlinks):
+        self.db_session = db_session
+        self.url = url
+        self.content = content
+        self.outlinks = outlinks
+
 
 async def connect_to_db(request_pool_size):
     '''Loads database and tables, returns a session object'''
@@ -60,8 +70,19 @@ async def create_page(session, link, content, outlinks):
 
     try:
         await session.execute(ins)
+        await session.commit()
     except Exception as e: 
         await session.rollback()
         print(f"Page failed to be added with exception:", e)
         return e
-    
+
+
+
+async def db_worker(db_queue):
+    while True:
+        try:
+            page_info = await db_queue.get()
+            await create_page(page_info.db_session, page_info.url, page_info.content, page_info.outlinks)
+        except asyncio.CancelledError:
+            break
+        

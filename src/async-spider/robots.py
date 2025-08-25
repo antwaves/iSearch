@@ -1,9 +1,8 @@
 import urllib
-import aiohttp
 import asyncio
 import urllib.robotparser
 import tldextract
-
+from util import to_domain
 
 class robotsTxt:
     def __init__(self, parser, crawl_delay, request_rate):
@@ -12,29 +11,23 @@ class robotsTxt:
         self.request_rate = request_rate
 
 
-async def check_robots(client, link: str, robot_dict: dict, execute_loop):
+async def check_robots(client, domain: str, robot_dict: dict):
     r_parser = urllib.robotparser.RobotFileParser()
-    robots_text = None
     
-    parseResult = urllib.parse.urlparse(link)
-    if parseResult.netloc.startswith("www."):
-        domainName = parseResult.netloc.split("www.")[1]
-    else:
-        domainName = parseResult.netloc
-    domainUrl = parseResult.scheme + "://" + domainName
-
+    robots_text = None
     #check if this has already been grabbed
-    if domainUrl in robot_dict.keys():
-        return robot_dict[domainUrl]
-    robotsUrl = parseResult.scheme + "://" + parseResult.netloc + "/robots.txt"
+    if domain in robot_dict.keys():
+        return robot_dict[domain]
+        
+    robots_url = domain + "/robots.txt"
 
     try:
         headers = {'User-Agent': 'iSearch'}
-        async with client.get(robotsUrl, allow_redirects=True, headers=headers) as response:            
+        async with client.get(robots_url, allow_redirects=True, headers=headers) as response:            
             if response.ok:
                 robots_text = await response.text()
             else:
-                robot_dict[domainUrl] = None
+                robot_dict[domain] = None
                 return
 
             if robots_text:
@@ -53,10 +46,10 @@ async def check_robots(client, link: str, robot_dict: dict, execute_loop):
                 if request_rate:
                     request_rate = request_rate.seconds / request_rate.requests
 
-                robot_dict[domainUrl] = robotsTxt(r_parser, crawl_delay, request_rate)
+                robot_dict[domain] = robotsTxt(r_parser, crawl_delay, request_rate)
                 return robot_dict[domainUrl]
             else:
-                robot_dict[domainUrl] = None
+                robot_dict[domain] = None
                 return 
     except Exception as e:
-        robot_dict[domainUrl] = None
+        robot_dict[domain] = None
