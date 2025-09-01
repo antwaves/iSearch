@@ -4,20 +4,60 @@ import os
 from urllib.parse import quote_plus
 
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from dotenv import load_dotenv
-from sqlalchemy import select, Table, Column, Integer, ForeignKey
+from sqlalchemy import select, Table, Column, Integer, ForeignKey, exists, update
 from sqlalchemy.dialects.postgresql import ARRAY, TEXT, INTEGER, insert
 from sqlalchemy.orm import (Mapped, declarative_base, mapped_column,
-                            sessionmaker, relationship, backref)
+                            sessionmaker, relationship, backref, selectinload)
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.sql import func
+import asyncpg
 #asyncpg too
 
 
+Base = declarative_base()
+
+page_links = Table(
+    "links",
+    Base.metadata,
+    Column("target_page_id", INTEGER, ForeignKey('pages.page_id'), primary_key=True),
+    Column("source_page_id", INTEGER, ForeignKey('pages.page_id'), primary_key=True),
+    schema = 'public'
+)
+
+global Page
+class Page(Base):
+    __tablename__ = "pages"
+
+    page_id: Mapped[int] = mapped_column(primary_key=True, index=True, unique=True)
+    page_url: Mapped[str] = mapped_column(TEXT, unique=True)
+    page_content: Mapped[str] = mapped_column(TEXT, nullable=True) 
+
+    outlinks = relationship(
+        "Page",
+        secondary=page_links,
+        primaryjoin=page_id == page_links.c.source_page_id,
+        secondaryjoin=page_id == page_links.c.target_page_id,
+        back_populates="inlinks",
+        lazy='selectin'
+        )
+
+    inlinks = relationship(
+        "Page",
+        secondary=page_links,
+        primaryjoin=page_id == page_links.c.target_page_id,
+        secondaryjoin=page_id == page_links.c.source_page_id,
+        back_populates="outlinks",
+        lazy='selectin'
+    )
+
+    def __repr__(self) -> str:
+        return f"{self.page_url}, with {len(self.outlinks)} outlinks and {len(self.inlinks)} inlinks"
+
+
 class db_info:
-    def __init__(self, db_session, url, content, outlinks):
-        self.db_session = db_session
+    def __init__(self, url, content, outlinks):
         self.url = url
         self.content = content
         self.outlinks = outlinks
@@ -37,43 +77,6 @@ async def connect_to_db(request_pool_size):
     engine = create_async_engine(url, pool_size=request_pool_size)
 
     Session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-    Base = declarative_base()
-
-    page_links = Table(
-        "links",
-        Base.metadata,
-        Column('link_id', INTEGER, primary_key=True),
-        Column("target_page_id", INTEGER, ForeignKey('pages.page_id')),
-        Column("source_page_id", INTEGER, ForeignKey('pages.page_id')),
-        schema = 'public'
-    )
-
-    global Page
-    class Page(Base):
-        __tablename__ = "pages"
-
-        page_id: Mapped[int] = mapped_column(primary_key=True, index=True, unique=True)
-        page_url: Mapped[str] = mapped_column(TEXT, unique=True)
-        page_content: Mapped[str] = mapped_column(TEXT, nullable=True) 
-
-        outlinks = relationship(
-            "Page",
-            secondary=page_links,
-            primaryjoin=page_id == page_links.c.source_page_id,
-            secondaryjoin=page_id == page_links.c.target_page_id,
-            back_populates="inlinks",
-         )
-
-        inlinks = relationship(
-            "Page",
-            secondary=page_links,
-            primaryjoin=page_id == page_links.c.target_page_id,
-            secondaryjoin=page_id == page_links.c.source_page_id,
-            back_populates="outlinks",
-        )
-
-        def __repr__(self) -> str:
-            return f"{self.page_url}"
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -82,48 +85,73 @@ async def connect_to_db(request_pool_size):
     return Session
 
 
+async def get_page(session, page_url):
+    check = select(Page).where(Page.page_url == page_url)
+    result = await session.execute(check)
+    return result.scalar()
+
+
 async def create_page(session, link, content, outlinks): 
-    outlink_pages = []
-    #try:
-    with session.no_autoflush:
-        for url in set(outlinks):
-            result = await session.execute(select(Page).where(Page.page_url == url and Page.page_url != link))
+    try:
+        link = link.replace('\x00', '')
+        content = content.replace('\x00', '')
 
-            await asyncio.sleep(20)
-            outlink_page = result.scalar_one_or_none()
+        stmt = insert(Page).values(page_url=link, page_content=content)
+        stmt = stmt.on_conflict_do_update(index_elements=['page_url'], set_=dict(page_content=content))
 
-            if not outlink_page:
-                outlink_page = Page(page_url=url)
-                session.add(outlink_page)
+        await session.execute(stmt) 
 
-            outlink_pages.append(outlink_page)
+        outpages = []
+        outpage_objects = []
+
+        for page_url in outlinks:
+            page_object = await get_page(session, page_url)
+
+            if not page_object:
+                outpages.append({"page_url" : page_url})
+            else:
+                outpage_objects.append(page_object)
+                outlinks.pop(outlinks.index(page_url))
+
+        if outpages:
+            stmt = insert(Page).on_conflict_do_nothing(index_elements=['page_url'])
+            await session.execute(stmt, outpages)
         
-        await session.commit()
-
-        result = await session.execute(select(Page).where(Page.page_url == link))
-        page = result.scalar_one_or_none()
-
+        for page_url in outlinks:
+            page_object = await get_page(session, page_url)
+            if page_object:
+                outpage_objects.append(page_object)
+    
+        page = await session.scalar(select(Page).where(Page.page_url == link).options(selectinload(Page.outlinks)))
+    
         if page:
-            page.page_content = content
-            page.outlinks = outlink_pages
-        else:
-            page = Page(page_url=link, page_content=content, outlinks=outlink_pages)
-            session.add(page)
+            page.outlinks = outpage_objects
 
-        await session.commit()
-        
-    # except Exception as e: 
-    #     await session.rollback()
-    #     print(f"Page failed to be added with exception:", e)
-    #     return e
+        await session.commit()   
 
+    except DBAPIError as e:
+        if isinstance(e.orig, asyncpg.exceptions.DeadlockDetectedError):     
+            print("Ran into deadlock")
+            await asyncio.sleep(0.1)
 
-
-async def db_worker(db_queue):
-    while True:
+    except Exception as e: 
+        print(f"Page failed to be added with exception:", e)
         try:
-            page_info = await db_queue.get()
-            await create_page(page_info.db_session, page_info.url, page_info.content, page_info.outlinks)
-        except asyncio.CancelledError:
-            break
-        
+            await session.rollback()
+        except Exception as e:
+            print("Failed to rollback with exception:", e)
+
+
+async def db_worker(session_maker, db_queue):
+    try:
+        async with session_maker() as session:
+            while True:
+                try:
+                    page_info = await db_queue.get()
+                    await create_page(session, page_info.url, page_info.content, page_info.outlinks)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    print("Exception in db worker", e)
+    except Exception as e:
+        print("DB worker's session threw an exception with error:", e)
