@@ -5,22 +5,21 @@ import time
 from util import unique_queue
 from db import db_info
 
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser
 from concurrent.futures import ProcessPoolExecutor
 
 
 class page_info:
-    def __init__(self, url, content, session):
+    def __init__(self, url, content):
         self.url = url
         self.content = content
-        self.session = session
 
     def __repr__(self):
         return self.url
 
 
 def parse_page(content, base_url):
-    tree = HTMLParser(content)
+    tree = LexborHTMLParser(content)
 
     if not tree:
         return [False, None, None]
@@ -48,7 +47,7 @@ def parse_page(content, base_url):
             link = urllib.parse.urljoin(base_url, link)
             outlinks.append(link)
 
-    text = tree.root.text()
+    text = tree.text(strip=True)
     return [True, text, outlinks]
 
 
@@ -61,11 +60,11 @@ async def add_page(page_info, parse_queue, link_queue, db_queue, executor):
     
         if not sucess or not text:
             return 
-
+        
         for link in outlinks:
             link_queue.put(link)
 
-        await db_queue.put(db_info(page_info.session, page_info.url, page_info.content, outlinks))
+        await db_queue.put(db_info(page_info.url, text, outlinks))
 
     except Exception as e:
         print(f"Exception in add pages {e}")

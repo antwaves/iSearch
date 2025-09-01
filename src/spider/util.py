@@ -12,6 +12,12 @@ def to_domain(link: str):
     return domain
 
 
+@lru_cache(maxsize=50000)
+def to_top_domain(link: str):
+    parse = tldextract.extract(link)
+    domain = parse.top_domain_under_public_suffix
+    return domain
+
 class queue:
     def __init__(self):
         self.queue = janus.Queue()
@@ -69,7 +75,7 @@ class unique_queue:
 
         domain_pages = {}
         for link in self.shuffle_queue:
-            domain = to_domain(link)
+            domain = to_top_domain(link)
             domain_pages.setdefault(domain, deque()).append(link)
 
         
