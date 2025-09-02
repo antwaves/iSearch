@@ -1,22 +1,25 @@
-import time
-import janus
-from collections import deque   
 import asyncio
-import tldextract
+import time
+from collections import deque
 from functools import lru_cache
 
-@lru_cache(maxsize=5000)
+import janus
+import tldextract
+
+
+@lru_cache(maxsize=10000)
 def to_domain(link: str):
     parse = tldextract.extract(link)
     domain = "https://" + parse.fqdn
     return domain
 
 
-@lru_cache(maxsize=50000)
+@lru_cache(maxsize=100000)
 def to_top_domain(link: str):
     parse = tldextract.extract(link)
     domain = parse.top_domain_under_public_suffix
     return domain
+
 
 class queue:
     def __init__(self):
@@ -78,10 +81,11 @@ class unique_queue:
             domain = to_top_domain(link)
             domain_pages.setdefault(domain, deque()).append(link)
 
-        
         remaining_domains = list(domain_pages.keys())
+    
         while remaining_domains:
             temp = []
+
             for domain in remaining_domains:
                 queue = domain_pages[domain]
 
@@ -92,3 +96,38 @@ class unique_queue:
                     temp.append(domain)
             remaining_domains = temp        
         self.shuffle_queue.clear()
+
+
+class lock:
+    def __init__(self):
+        self._condition = asyncio.Condition() #true if locked, false if not
+        self._locked = False
+
+    @property
+    def locked(self):
+        return self._locked
+
+
+    async def lock(self):
+        async with self._condition:
+            while self._locked:
+                await self._condition.wait()
+            self._locked = True
+
+
+    async def unlock(self):
+        async with self._condition:
+            self._locked = False
+            self._condition.notify_all()
+
+
+    async def wait_for_unlock(self):
+        await self.lock()
+
+
+    async def __aenter__(self):
+        await self.lock()
+
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.unlock()

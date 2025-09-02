@@ -1,19 +1,19 @@
-import datetime
 import asyncio
+import datetime
 import os
 from urllib.parse import quote_plus
 
-import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from dotenv import load_dotenv
-from sqlalchemy import select, Table, Column, Integer, ForeignKey, exists, update
-from sqlalchemy.dialects.postgresql import ARRAY, TEXT, INTEGER, insert
-from sqlalchemy.orm import (Mapped, declarative_base, mapped_column,
-                            sessionmaker, relationship, backref, selectinload)
-from sqlalchemy.exc import DBAPIError
-from sqlalchemy.sql import func
 import asyncpg
-#asyncpg too
+import sqlalchemy as sa
+from dotenv import load_dotenv
+from sqlalchemy import (Column, ForeignKey, Integer, Table, exists, select,
+                        update)
+from sqlalchemy.dialects.postgresql import ARRAY, INTEGER, TEXT, insert
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
+                            relationship, selectinload, sessionmaker)
+from sqlalchemy.sql import func
 
 
 Base = declarative_base()
@@ -53,7 +53,7 @@ class Page(Base):
     )
 
     def __repr__(self) -> str:
-        return f"{self.page_url}, with {len(self.outlinks)} outlinks and {len(self.inlinks)} inlinks"
+        return f"{page_url}, with {len(outlinks)} outlinks and {len(inlinks)} inlinks"
 
 
 class db_info:
@@ -93,9 +93,6 @@ async def get_page(session, page_url):
 
 async def create_page(session, link, content, outlinks): 
     try:
-        link = link.replace('\x00', '')
-        content = content.replace('\x00', '')
-
         stmt = insert(Page).values(page_url=link, page_content=content)
         stmt = stmt.on_conflict_do_update(index_elements=['page_url'], set_=dict(page_content=content))
 
