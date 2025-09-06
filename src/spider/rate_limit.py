@@ -46,6 +46,7 @@ async def check_robots(client, domain: str, robot_dict: dict, headers: dict):
                 request_rate = request_rate.seconds / request_rate.requests
 
             robot_dict[domain] = robotsTxt(r_parser, crawl_delay, request_rate)
+
             return robot_dict[domain]
 
     except Exception as e:

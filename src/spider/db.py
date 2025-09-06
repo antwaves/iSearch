@@ -108,7 +108,7 @@ async def create_page(session, link, content, outlinks):
                 outpages.append({"page_url" : page_url})
             else:
                 outpage_objects.append(page_object)
-                outlinks.pop(outlinks.index(page_url))
+                outlinks.remove(page_url)
 
         if outpages:
             stmt = insert(Page).on_conflict_do_nothing(index_elements=['page_url'])
