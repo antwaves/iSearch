@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections import deque
+import itertools
 from functools import lru_cache
 
 import janus
@@ -57,7 +58,8 @@ class unique_queue:
 
 
     def task_done(self) -> None:
-        self.queue.task_done()
+        if self.queue._unfinished_tasks > 0:
+            self.queue.task_done()
 
 
     def empty(self) -> bool:
@@ -69,33 +71,40 @@ class unique_queue:
 
 
     async def shuffle(self):
-        print("Shuffling")
-        self.shuffle_queue.extend(self.queue._queue)
-        self.queue._queue = deque()
+        try:
+            print("Shuffling")
+            self.shuffle_queue.extend(self.queue._queue)
+            self.queue._queue = deque()
 
-        domains = set()
-        domain_pages = {}
+            size = min(len(self.shuffle_queue), 10000)
+            temp_queue = deque(itertools.islice(self.shuffle_queue, 0, size))
+            leftover = deque(itertools.islice(self.shuffle_queue, size, len(self.shuffle_queue)))
 
-        domain_pages = {}
-        for link in self.shuffle_queue:
-            domain = to_top_domain(link)
-            domain_pages.setdefault(domain, deque()).append(link)
+            domains = set()
+            domain_pages = {}
 
-        remaining_domains = list(domain_pages.keys())
-    
-        while remaining_domains:
-            temp = []
+            domain_pages = {}
+            for link in temp_queue:
+                domain = to_top_domain(link)
+                domain_pages.setdefault(domain, deque()).append(link)
 
-            for domain in remaining_domains:
-                queue = domain_pages[domain]
+            remaining_domains = list(domain_pages.keys())
+        
+            while remaining_domains:
+                temp = []
 
-                if queue:
-                    await self.queue.put(queue.popleft())
-                
-                if queue:
-                    temp.append(domain)
-            remaining_domains = temp        
-        self.shuffle_queue.clear()
+                for domain in remaining_domains:
+                    queue = domain_pages[domain]
+
+                    if queue:
+                        await self.queue.put(queue.popleft())
+                    
+                    if queue:
+                        temp.append(domain)
+                remaining_domains = temp        
+            self.shuffle_queue = leftover
+        except Exception as e:
+            print(e)
 
 
 class lock:
