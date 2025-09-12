@@ -1,5 +1,4 @@
 import asyncio
-import datetime
 import os
 from urllib.parse import quote_plus
 
@@ -12,7 +11,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, INTEGER, TEXT, insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
-                            relationship, selectinload, sessionmaker)
+                            relationship, selectinload, sessionmaker, load_only)
 from sqlalchemy.sql import func
 
 
@@ -53,7 +52,7 @@ class Page(Base):
     )
 
     def __repr__(self) -> str:
-        return f"{page_url}, with {len(outlinks)} outlinks and {len(inlinks)} inlinks"
+        return f"{self.page_url}"
 
 
 class db_info:
@@ -79,14 +78,12 @@ async def connect_to_db(request_pool_size):
     Session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-
+        
     return Session
 
-
 async def get_page(session, page_url):
-    check = select(Page).where(Page.page_url == page_url)
+    check = select(Page).where(Page.page_url == page_url).options(load_only(Page.page_url))
     result = await session.execute(check)
     return result.scalar()
 
@@ -124,6 +121,7 @@ async def create_page(session, link, content, outlinks):
         if page:
             page.outlinks = outpage_objects
 
+        #print(f"{link} added to db")
         await session.commit()   
 
     except DBAPIError as e:

@@ -2,6 +2,7 @@ import asyncio
 import re
 import time
 import urllib
+from concurrent.futures import ThreadPoolExecutor
 
 import aiohttp
 import requests
@@ -31,6 +32,7 @@ class webcrawler:
         self.domain_robot_rules = {}
 
         self.crawled = 0
+
         self.max_crawl = 10000
         self.max_response_size = 5 * 1024 * 1024  
 
@@ -66,15 +68,17 @@ class webcrawler:
         workers = [asyncio.create_task(self.worker(worker_num)) 
                     for worker_num in range(self.workers)]
         
-        workers = workers + [asyncio.create_task(db_worker(client_session, self.db_queue)) for _ in range(self.workers)]
+        workers += [asyncio.create_task(db_worker(client_session, self.db_queue)) for _ in range(self.workers // 2)]
+
+        executor = ThreadPoolExecutor()
+        workers += workers + [asyncio.create_task(parse_worker(self.parse_queue, self.link_queue, self.db_queue, executor)) for _ in range(self.workers // 2)] 
         
-        workers.append(asyncio.create_task(parse_worker(self.parse_queue, self.link_queue, self.db_queue)))
         workers.append(asyncio.create_task(self.shuffle_handler()))
 
         try:
             await asyncio.gather(*workers)
         except asyncio.CancelledError:
-            pass
+            pass    
 
 
     async def worker(self, worker_num):
@@ -112,7 +116,6 @@ class webcrawler:
                 sleep_time = get_sleep_time(domain, self.domain_wait_times)
                 if sleep_time:
                     await asyncio.sleep(sleep_time)
-
                 async with self.client.get(url, allow_redirects=True, headers=self.response_headers) as response:
                     if not filter_response(response.headers, self.max_response_size):
                         self.exit_task(sucessful_crawl)

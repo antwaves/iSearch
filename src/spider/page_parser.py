@@ -1,7 +1,6 @@
 import asyncio
 import time
 import urllib
-from concurrent.futures import ProcessPoolExecutor
 
 from selectolax.lexbor import LexborHTMLParser
 
@@ -39,6 +38,8 @@ def parse_page(content, base_url):
 
     if not tree:
         return [False, None, None]
+
+    tree.strip_tags(['style', 'script'])
     
     outlinks = []
     for node in tree.css("a"):
@@ -94,12 +95,11 @@ async def add_page(page_info, parse_queue, link_queue, db_queue, executor):
         parse_queue.task_done()    
 
 
-async def parse_worker(parse_queue, link_queue, db_queue):
-    with ProcessPoolExecutor() as executor:
-        while True:
-            try:
-                info = await parse_queue.get()
-                await add_page(info, parse_queue, link_queue, db_queue, executor)
-            except asyncio.CancelledError:
-                break
-        
+async def parse_worker(parse_queue, link_queue, db_queue, executor):
+    while True:
+        try:
+            info = await parse_queue.get()
+            await add_page(info, parse_queue, link_queue, db_queue, executor)
+        except asyncio.CancelledError:
+            break
+    

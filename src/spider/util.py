@@ -2,20 +2,20 @@ import asyncio
 import time
 from collections import deque
 import itertools
-from functools import lru_cache
+from functools import cache
 
 import janus
 import tldextract
 
 
-@lru_cache(maxsize=10000)
+@cache
 def to_domain(link: str):
     parse = tldextract.extract(link)
     domain = "https://" + parse.fqdn
     return domain
 
 
-@lru_cache(maxsize=100000)
+@cache
 def to_top_domain(link: str):
     parse = tldextract.extract(link)
     domain = parse.top_domain_under_public_suffix
@@ -38,6 +38,9 @@ class queue:
     
     async def close(self) -> None:
         await queue.aclose()
+    
+    def length(self):
+        return self.queue._qsize()
 
 
 class unique_queue:
