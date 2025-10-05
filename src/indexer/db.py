@@ -11,9 +11,8 @@ from sqlalchemy.dialects.postgresql import ARRAY, INTEGER, TEXT, insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
-                            relationship, selectinload, sessionmaker)
+                            relationship, selectinload, sessionmaker, load_only)
 from sqlalchemy.sql import func
-
 
 Base = declarative_base()
 
@@ -25,11 +24,14 @@ page_links = Table(
     schema = 'public'
 )
 
-word_links = Table(
-  "links",
-  Base.metadata,
-  Column("target_pages", INTEGER, ForeignKey('pages.page_id'), primary_key=True) 
+term_links = Table(
+    "term_page_links",
+    Base.metadata,
+    Column("term_id", INTEGER, ForeignKey("terms.term_id"), primary_key=True),
+    Column("page_id", INTEGER, ForeignKey("pages.page_id"), primary_key=True),
+    schema = 'public'
 )
+
 
 class Page(Base):
     __tablename__ = "pages"
@@ -55,10 +57,20 @@ class Page(Base):
         back_populates="outlinks",
         lazy='selectin'
     )
+    
 
-    def __repr__(self) -> str:
-        return f"{self.page_url}"
+class Term(Base):
+    __tablename__ = "terms"
 
+    term_id: Mapped[int] = mapped_column(primary_key=True, index=True, unique=True)
+    term: Mapped[str] = mapped_column(TEXT, unique=True)
+    term_count: Mapped[int] = mapped_column()
+    
+    pages = relationship(
+        "Page",
+        secondary=term_links,
+        lazy='selectin'
+    )
 
 
 async def connect_to_db(request_pool_size):
@@ -75,6 +87,8 @@ async def connect_to_db(request_pool_size):
     engine = create_async_engine(url, pool_size=request_pool_size)
 
     Session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
     return Session
 
@@ -85,3 +99,24 @@ async def get_pages(session, queue):
 
     for page in result:
         await queue.put([page.page_id, page.page_content])
+
+
+async def add_term(session, term_str: str, term_data):
+    stmt = select(Term).where(Term.term == term_str).options(selectinload(Term.pages))
+    result = await session.execute(stmt)
+    term = result.scalar_one_or_none()
+
+    if not term:
+        term = Term(term=term_str, term_count=term_data.total_occurences)
+        session.add(term)
+
+    page_objects = []
+    for p in term_data.pages:
+        stmt = select(Page).where(Page.page_id == p.id).options(load_only(Page.page_id))
+        result = await session.execute(stmt)
+        page = result.scalar_one_or_none()
+
+        if page:
+            term.pages.append(page)
+
+    await session.commit()
