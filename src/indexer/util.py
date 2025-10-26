@@ -7,7 +7,6 @@ class queue:
     async def put(self, item) -> None:
         await self.queue.put(item)
 
-
     async def get(self):
         return await self.queue.get()
 
@@ -17,7 +16,6 @@ class queue:
 
     def length(self) -> int:
         return len(self.queue._queue)
-
 
 class page_info:
     #contains page id and content

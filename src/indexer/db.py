@@ -8,11 +8,12 @@ from dotenv import load_dotenv
 from sqlalchemy import (Column, ForeignKey, Integer, Table, exists, select,
                         update)
 from sqlalchemy.dialects.postgresql import ARRAY, INTEGER, TEXT, insert
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, MissingGreenlet
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
                             relationship, selectinload, sessionmaker, load_only)
 from sqlalchemy.sql import func
+
 
 Base = declarative_base()
 
@@ -109,14 +110,21 @@ async def add_term(session, term_str: str, term_data):
     if not term:
         term = Term(term=term_str, term_count=term_data.total_occurences)
         session.add(term)
-
-    page_objects = []
-    for p in term_data.pages:
-        stmt = select(Page).where(Page.page_id == p.id).options(load_only(Page.page_id))
         result = await session.execute(stmt)
-        page = result.scalar_one_or_none()
+        term = result.scalar_one_or_none()
 
-        if page:
-            term.pages.append(page)
+    p_ids = [p.id for p in term_data.pages]
+    stmt = select(Page).where(Page.page_id.in_(p_ids)).options(load_only(Page.page_id))
+    result = await session.execute(stmt)
+    pages = result.scalars().all()
+    term.pages = pages
+    
 
-    await session.commit()
+async def retrieve_term_pages(session, term_str):
+    stmt = select(Term).where(Term.term == term_str).options(selectinload(Term.pages))
+    result = await session.execute(stmt)
+    term = result.scalar_one_or_none()
+    
+    if term:
+        for page in term.pages:
+            print(page.page_url)
