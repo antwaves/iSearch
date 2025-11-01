@@ -7,15 +7,19 @@ import sqlalchemy as sa
 from dotenv import load_dotenv
 from sqlalchemy import (Column, ForeignKey, Integer, Table, exists, select,
                         update)
-from sqlalchemy.dialects.postgresql import ARRAY, INTEGER, TEXT, insert
+from sqlalchemy.dialects.postgresql import ARRAY, INTEGER, TEXT, insert, asyncpg
 from sqlalchemy.exc import DBAPIError, MissingGreenlet
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
                             relationship, selectinload, sessionmaker, load_only)
 from sqlalchemy.sql import func
 
+import time
 
+
+MAX_PARAMS = 15000
 Base = declarative_base()
+
 
 page_links = Table(
     "links",
@@ -65,7 +69,7 @@ class Term(Base):
 
     term_id: Mapped[int] = mapped_column(primary_key=True, index=True, unique=True)
     term: Mapped[str] = mapped_column(TEXT, unique=True)
-    term_count: Mapped[int] = mapped_column()
+    total_pages: Mapped[int] = mapped_column()
     
     pages = relationship(
         "Page",
@@ -94,31 +98,49 @@ async def connect_to_db(request_pool_size):
     return Session
 
 
-async def get_pages(session, queue):
+async def get_pages(session, pages):
     stmt = select(Page).where(Page.page_content != None)
     result = await session.scalars(stmt) 
 
+    i = 0
     for page in result:
-        await queue.put([page.page_id, page.page_content])
+        i += 1
+        if i % 100 == 0:
+            print(f"Got {i} pages {" " * 10} \r", end="")
+        pages.append([page.page_id, page.page_content])
 
 
-async def add_term(session, term_str: str, term_data):
-    stmt = select(Term).where(Term.term == term_str).options(selectinload(Term.pages))
-    result = await session.execute(stmt)
-    term = result.scalar_one_or_none()
+async def get_term_ids(session, term_info):
+    ids = []
+    chunk, values = [], [{"term": item[0], "total_pages": item[1]} for item in term_info]
 
-    if not term:
-        term = Term(term=term_str, term_count=term_data.total_occurences)
-        session.add(term)
-        result = await session.execute(stmt)
-        term = result.scalar_one_or_none()
+    while values:
+        length = len(values)
+        chunk, values = values[:min(MAX_PARAMS, length)], values[min(MAX_PARAMS, length):]
 
-    p_ids = [p.id for p in term_data.pages]
-    stmt = select(Page).where(Page.page_id.in_(p_ids)).options(load_only(Page.page_id))
-    result = await session.execute(stmt)
-    pages = result.scalars().all()
-    term.pages = pages
-    
+        term_insert = insert(Term).values(chunk)
+        term_insert = term_insert.on_conflict_do_update(index_elements=[Term.term], set_={"total_pages": term_insert.excluded.total_pages})
+        term_insert = term_insert.returning(Term.term, Term.term_id)
+        result = await session.execute(term_insert)
+
+        ids.extend(result.all())
+
+        await session.commit()
+
+    return ids
+
+
+async def add_chunk(session, chunk):
+    try:
+        chunk_insert = insert(term_links).values(chunk)
+        chunk_insert = chunk_insert.on_conflict_do_nothing(index_elements=[term_links.c.term_id, term_links.c.page_id])
+        await session.execute(chunk_insert)
+
+    except Exception as e:
+        print(f"Exception in add chunk")
+        with open("log.txt", "a") as f:
+            f.write(f"add_chunk threw an error: {e}\n")
+
 
 async def retrieve_term_pages(session, term_str):
     stmt = select(Term).where(Term.term == term_str).options(selectinload(Term.pages))

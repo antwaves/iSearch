@@ -143,3 +143,40 @@ class lock:
 
     async def __aexit__(self, exc_type, exc, tb):
         await self.unlock()
+
+
+class log_info:
+    def __init__(self):
+        self.crawled = 0
+        self.added_to_db = 0
+        self.last_visisted = ""
+        self.last_added = ""
+    
+
+    def display(self) -> None:
+        txt = f"{self.crawled} crawled\t|\t{self.added_to_db} added to database{" " * 20}\nLast visited website: {self.last_visisted}{" " * 75} \nLast added to databse: {self.last_added}{" " * 75}"
+       # print("\033[H", txt)
+
+
+    def inc(self, crawl: bool = False, added: bool = False) -> None:
+        if not((crawl or added) and not(crawl and added)):
+            print("Supply a valid increment!")
+            return None
+        
+        if crawl:
+            self.crawled += 1
+        else: 
+            self.added_to_db += 1
+
+        self.display()
+    
+
+    def update(self, visited = False, added = False) -> None:
+        if not((visited or added) and not(visited and added)):
+            print("Supply a valid update!")
+            return None
+        
+        if visited:
+            self.last_visisted = visited
+        else:
+            self.last_added = added

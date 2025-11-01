@@ -88,41 +88,42 @@ async def get_page(session, page_url):
     return result.scalar()
 
 
-async def create_page(session, link, content, outlinks): 
+async def create_page(session: AsyncSession, link: str, content: str, outlinks: list[str]):
+    print("attempt", link)
     try:
-        stmt = insert(Page).values(page_url=link, page_content=content)
-        stmt = stmt.on_conflict_do_update(index_elements=['page_url'], set_=dict(page_content=content))
+        stmt = (insert(Page).values(page_url=link, page_content=content)
+            .on_conflict_do_update(index_elements=["page_url"], set_={"page_content": content})
+        )
+        await session.execute(stmt)
 
-        await session.execute(stmt) 
+        result = await session.execute(select(Page).where(Page.page_url.in_(outlinks)))
+        existing_pages = result.scalars().all()
+        existing_page_urls = {page.page_url for page in existing_pages}
+        outpage_objects = list(existing_pages)
 
-        outpages = []
-        outpage_objects = []
+        remaining_pages = [url for url in outlinks if url not in existing_page_urls]
+        if remaining_pages:
+            stmt = (insert(Page).values([{"page_url": url} for url in remaining_pages]).on_conflict_do_nothing(index_elements=["page_url"]))
+            await session.execute(stmt)
 
-        for page_url in outlinks:
-            page_object = await get_page(session, page_url)
+            result = await session.execute(select(Page).where(Page.page_url.in_(remaining_pages)))
+            new_pages = result.scalars().all()
+            outpage_objects.extend(new_pages)
 
-            if not page_object:
-                outpages.append({"page_url" : page_url})
-            else:
-                outpage_objects.append(page_object)
-                outlinks.remove(page_url)
+        await session.commit()
 
-        if outpages:
-            stmt = insert(Page).on_conflict_do_nothing(index_elements=['page_url'])
-            await session.execute(stmt, outpages)
-        
-        for page_url in outlinks:
-            page_object = await get_page(session, page_url)
-            if page_object:
-                outpage_objects.append(page_object)
-    
-        page = await session.scalar(select(Page).where(Page.page_url == link).options(selectinload(Page.outlinks)))
-    
+        result = await session.execute(select(Page).where(Page.page_url == link).options(selectinload(Page.outlinks)))
+        page = result.scalar_one_or_none()
+
         if page:
             page.outlinks = outpage_objects
 
-        #print(f"{link} added to db")
-        await session.commit()   
+        
+        await session.commit()
+
+    except Exception as e:
+        await session.rollback()
+        print(f"Error adding {link}: {e}")
 
     except DBAPIError as e:
         if isinstance(e.orig, asyncpg.exceptions.DeadlockDetectedError):     
@@ -137,13 +138,15 @@ async def create_page(session, link, content, outlinks):
             print("Failed to rollback with exception:", e)
 
 
-async def db_worker(session_maker, db_queue):
+async def db_worker(session_maker, db_queue, log_info):
     try:
         async with session_maker() as session:
             while True:
                 try:
                     page_info = await db_queue.get()
                     await create_page(session, page_info.url, page_info.content, page_info.outlinks)
+                    log_info.inc(added=True)
+                    log_info.update(added=page_info.url)
                 except asyncio.CancelledError:
                     break
                 except Exception as e:

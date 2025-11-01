@@ -1,6 +1,7 @@
 import asyncio
 import time
 import urllib
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
 
 from selectolax.lexbor import LexborHTMLParser
 
@@ -61,11 +62,25 @@ def parse_page(content, base_url):
         if "https://" in link:
             outlinks.append(link)
         else:
-            link = urllib.parse.urljoin(base_url, link)
+            link = urljoin(base_url, link)
             outlinks.append(link)
 
     text = tree.text(strip=True)
     return [True, text, outlinks]
+
+
+def clean_link(link):
+    #removes tracking parameters 
+
+    blocked_params = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', "e",
+                    'ref', "source", "ref_source", '_hsfp', '_hssc', '_hstc', 'gclid', 'fbclid']
+    parsed_link = urlparse(link)
+    query_params = parse_qs(parsed_link.query)
+    query_params =  {key: value for key, value in query_params.items() if key.lower() not in blocked_params}
+    new_query = urlencode(query_params, doseq=True)
+    cleaned_link = urlunparse(parsed_link._replace(query=new_query))
+    
+    return cleaned_link
 
 
 async def add_page(page_info, parse_queue, link_queue, db_queue, executor):
@@ -82,7 +97,8 @@ async def add_page(page_info, parse_queue, link_queue, db_queue, executor):
             link_queue.put(link)
         
         url = page_info.url.replace('\x00', '')
-        text= text.replace('\x00', '')
+        url = clean_link(url)
+        text = text.replace('\x00', '')
 
         await db_queue.put(db_info(page_info.url, text, outlinks))
 
