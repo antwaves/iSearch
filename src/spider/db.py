@@ -15,6 +15,9 @@ from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
 from sqlalchemy.sql import func
 
 
+#TODO: CLEAN THIS WHOLE FILE!!!!
+
+
 Base = declarative_base()
 
 page_links = Table(
@@ -67,7 +70,7 @@ async def connect_to_db(request_pool_size):
 
     load_dotenv()
     user = os.getenv("USER")
-    password = quote_plus(os.getenv("PASSWORD"))
+    password = os.getenv("PASSWORD")
     host = os.getenv("HOST")
     port = os.getenv("PORT")
     dbname = os.getenv("DBNAME")
@@ -81,6 +84,7 @@ async def connect_to_db(request_pool_size):
         await conn.run_sync(Base.metadata.create_all)
         
     return Session
+
 
 async def get_page(session, page_url):
     check = select(Page).where(Page.page_url == page_url).options(load_only(Page.page_url))
@@ -147,9 +151,12 @@ async def db_worker(session_maker, db_queue, log_info):
                     await create_page(session, page_info.url, page_info.content, page_info.outlinks)
                     log_info.inc(added=True)
                     log_info.update(added=page_info.url)
+
                 except asyncio.CancelledError:
                     break
+
                 except Exception as e:
                     print("Exception in db worker", e)
+
     except Exception as e:
         print("DB worker's session threw an exception with error:", e)

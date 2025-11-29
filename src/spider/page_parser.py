@@ -2,12 +2,16 @@ import asyncio
 import time
 import urllib
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
+from concurrent.futures import ThreadPoolExecutor
 
 from selectolax.lexbor import LexborHTMLParser
 
 from db import db_info
-from util import unique_queue
+from util import unique_queue, silent_log
 
+#TODO: REFACTOR IN A CLASS???
+
+executor = ThreadPoolExecutor()
 
 class page_info:
     def __init__(self, url, content):
@@ -18,27 +22,48 @@ class page_info:
         return f"{self.url} with a content character length of {len(self.content)}"
 
 
-def filter_response(headers, max_response_size): #returns 
-    if int(headers.get("Content-Length", 0)) > max_response_size:
-        return False
+async def parse_worker(parse_queue, link_queue, db_queue):
+    while True:
+        try:
+            page_info = await parse_queue.get()
+            await add_page(page_info, parse_queue, link_queue, db_queue)
+        except asyncio.CancelledError:
+            break
 
-    content_type = headers.get('Content-Type')
-    content_lang = headers.get('Content-Language')
 
-    if content_type and ("text/html" not in content_type):
-        return False
+async def run_parser(page_info):
+    run_loop = asyncio.get_running_loop()
+    return await run_loop.run_in_executor(executor, parse_page, page_info.content, page_info.url)
+    
 
-    if content_lang and ("en" not in content_lang):
-        return False
+async def add_page(page_info, parse_queue, link_queue, db_queue):
+    try:
+        text, outlinks = await run_parser(page_info)
+    
+        if not text:
+            return 
+        
+        for link in outlinks:
+            link_queue.put(link)
+        
+        url = page_info.url.replace('\x00', '')
+        url = clean_link(url)
+        text = text.replace('\x00', '')
 
-    return True
+        await db_queue.put(db_info(page_info.url, text, outlinks))
+
+    except Exception as e:
+        silent_log(e, "add_page")
+
+    finally: 
+        parse_queue.task_done()    
 
 
 def parse_page(content, base_url):
     tree = LexborHTMLParser(content)
 
     if not tree:
-        return [False, None, None]
+        return (None, None)
 
     tree.strip_tags(['style', 'script'])
     
@@ -53,7 +78,7 @@ def parse_page(content, base_url):
         if link.endswith((".jpg", ".png", ".pdf", ".css", ".js", ".zip", ".exe")):
             continue
     
-        if "mailto@" in link or "mailto:" in link:
+        if "mailto@" in link or "mailto:" in link or "tel:" in link:
             continue
 
         if "#" in link:
@@ -66,8 +91,8 @@ def parse_page(content, base_url):
             outlinks.append(link)
 
     text = tree.text(strip=True)
-    return [True, text, outlinks]
-
+    return (text, outlinks)
+    
 
 def clean_link(link):
     #removes tracking parameters 
@@ -81,41 +106,3 @@ def clean_link(link):
     cleaned_link = urlunparse(parsed_link._replace(query=new_query))
     
     return cleaned_link
-
-
-async def add_page(page_info, parse_queue, link_queue, db_queue, executor):
-    run_loop = asyncio.get_running_loop()
-
-    start = time.perf_counter()
-    try:
-        sucess, text, outlinks = await run_loop.run_in_executor(executor, parse_page, page_info.content, page_info.url)
-    
-        if not sucess or not text:
-            return 
-        
-        for link in outlinks:
-            link_queue.put(link)
-        
-        url = page_info.url.replace('\x00', '')
-        url = clean_link(url)
-        text = text.replace('\x00', '')
-
-        await db_queue.put(db_info(page_info.url, text, outlinks))
-
-    except Exception as e:
-        print(f"Exception in add pages {e}")
-        with open("log.txt", "a") as f:
-            f.write(f"Add_page threw an error: {e}")
-
-    finally: 
-        parse_queue.task_done()    
-
-
-async def parse_worker(parse_queue, link_queue, db_queue, executor):
-    while True:
-        try:
-            info = await parse_queue.get()
-            await add_page(info, parse_queue, link_queue, db_queue, executor)
-        except asyncio.CancelledError:
-            break
-    

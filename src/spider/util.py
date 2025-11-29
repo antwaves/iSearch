@@ -3,6 +3,7 @@ import time
 from collections import deque
 import itertools
 from functools import cache
+import traceback
 
 import janus
 import tldextract
@@ -11,7 +12,12 @@ import tldextract
 @cache
 def to_domain(link: str):
     parse = tldextract.extract(link)
-    domain = "https://" + parse.fqdn
+
+    if "https" in link:
+        domain = "https://" + parse.fqdn
+    else: #i really dont care about a website that isnt https or http
+        domain = "http://" + parse.fqdn
+
     return domain
 
 
@@ -73,6 +79,7 @@ class unique_queue:
         return len(self.queue._queue)
 
 
+    #TODO: CLEAN THIS!!!
     async def shuffle(self):
         try:
             print("Shuffling")
@@ -155,6 +162,7 @@ class log_info:
 
     def display(self) -> None:
         txt = f"{self.crawled} crawled\t|\t{self.added_to_db} added to database{" " * 20}\nLast visited website: {self.last_visisted}{" " * 75} \nLast added to databse: {self.last_added}{" " * 75}"
+        print(txt)
        # print("\033[H", txt)
 
 
@@ -168,7 +176,7 @@ class log_info:
         else: 
             self.added_to_db += 1
 
-        self.display()
+        #self.display()
     
 
     def update(self, visited = False, added = False) -> None:
@@ -180,3 +188,24 @@ class log_info:
             self.last_visisted = visited
         else:
             self.last_added = added
+
+
+def silent_log(e, function_name="A function", other_info: list = []):
+    tb = traceback.extract_tb(e.__traceback__)
+    trace = ""
+
+    for frame in tb:
+        trace = f"{trace} {frame.filename} {frame.name} {frame.lineno} |"
+    
+    with open("log.txt", "a") as f:
+        try:
+            f.write(f"\n{function_name} threw an error: {str(e)}")
+            f.write(f"\nTraceback: {trace}\n")
+            for item in other_info:
+                f.write(item + " ")
+            f.write("\n\n")
+
+        except Exception as e: #invalid character while writing error
+            pass
+
+    return None
