@@ -15,9 +15,6 @@ from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
 from sqlalchemy.sql import func
 
 
-#TODO: CLEAN THIS WHOLE FILE!!!!
-
-
 Base = declarative_base()
 
 page_links = Table(
@@ -65,35 +62,64 @@ class db_info:
         self.outlinks = outlinks
 
 
-async def connect_to_db(request_pool_size):
-    '''Loads database and tables, returns a session object'''
-
-    load_dotenv()
-    user = os.getenv("USER")
-    password = os.getenv("PASSWORD")
-    host = os.getenv("HOST")
-    port = os.getenv("PORT")
-    dbname = os.getenv("DBNAME")
-
-    url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
-    engine = create_async_engine(url, pool_size=request_pool_size)
-
-    Session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        
-    return Session
+class database_handler:
+    def __init__(self, database_queue, log):
+        self.session_maker = None
+        self.database_queue = database_queue
+        self.cancelled = False
+        self.log = log
 
 
-async def get_page(session, page_url):
-    check = select(Page).where(Page.page_url == page_url).options(load_only(Page.page_url))
-    result = await session.execute(check)
-    return result.scalar()
+    async def connect_to_db(self, request_pool_size):
+        '''Loads database and tables, returns a session object'''
+
+        load_dotenv()
+        user = os.getenv("USER")
+        password = os.getenv("PASSWORD")
+        host = os.getenv("HOST")
+        port = os.getenv("PORT")
+        dbname = os.getenv("DBNAME")
+
+        url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{dbname}"
+        engine = create_async_engine(url, pool_size=request_pool_size)
+
+        Session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            
+        self.session_maker = Session
+
+    
+    async def worker(self):
+        try:
+            async with self.session_maker() as session:
+                while not self.cancelled:
+                    try:
+                        page_info = await self.database_queue.get()
+                        await create_page(session, page_info)
+
+                        self.log.inc(added=True)
+                        self.log.update(added=page_info.url)
+
+                    except asyncio.CancelledError:
+                        break
+
+                    except Exception as e:
+                        print("Exception in db worker", e)
+
+        except Exception as e:
+            print("DB worker's session threw an exception with error:", e)
 
 
-async def create_page(session: AsyncSession, link: str, content: str, outlinks: list[str]):
-    print("attempt", link)
+
+async def create_page(session: AsyncSession, page_info):
+    link = page_info.url
+    content = page_info.content
+    outlinks = page_info.outlinks
+
+    print("attempt ", link)
+
     try:
         stmt = (insert(Page).values(page_url=link, page_content=content)
             .on_conflict_do_update(index_elements=["page_url"], set_={"page_content": content})
@@ -121,7 +147,6 @@ async def create_page(session: AsyncSession, link: str, content: str, outlinks: 
 
         if page:
             page.outlinks = outpage_objects
-
         
         await session.commit()
 
@@ -140,23 +165,3 @@ async def create_page(session: AsyncSession, link: str, content: str, outlinks: 
             await session.rollback()
         except Exception as e:
             print("Failed to rollback with exception:", e)
-
-
-async def db_worker(session_maker, db_queue, log_info):
-    try:
-        async with session_maker() as session:
-            while True:
-                try:
-                    page_info = await db_queue.get()
-                    await create_page(session, page_info.url, page_info.content, page_info.outlinks)
-                    log_info.inc(added=True)
-                    log_info.update(added=page_info.url)
-
-                except asyncio.CancelledError:
-                    break
-
-                except Exception as e:
-                    print("Exception in db worker", e)
-
-    except Exception as e:
-        print("DB worker's session threw an exception with error:", e)

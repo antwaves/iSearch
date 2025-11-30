@@ -1,176 +1,87 @@
-import asyncio
-import re
 import time
-import urllib
 
+import asyncio
 import aiohttp
-import requests
-from selectolax.parser import HTMLParser
 
-from db import connect_to_db, create_page, db_worker
-from page_parser import page_info, parse_worker
-from rate_limit import (check_robots, get_domain_lock, get_sleep_time,
-						get_rate_limits, robotsTxt, cannot_fetch)
-from util import queue, to_domain, unique_queue, log_info, silent_log
+from crawler import webcrawler
+from page_parser import parser
+from db import database_handler
+from util import queue, unique_queue, log_info
 
-#and cchardet and pip-system-certs
 
-t = time.perf_counter()
+class spider:
+	def __init__(self):
+		#if none, need to init later in an async context
 
-#TODO: REFACTOR IT ALLLLLLLLLL
-
-class webcrawler:
-	def __init__(self, client, workers):
-		self.client = client
 		self.link_queue = unique_queue()
-
-		self.domain_wait_times = {}
-		self.domain_locks = {}
-		self.domain_robot_rules = {}
-
-		self.max_crawl = 1000
-		self.max_response_size = 5 * 1024 * 1024  
-
-		self.response_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
-								'Accept-Language' : 'en-US,en;q=0.9', 'Accept' : '*/*'}
-		self.log = log_info()
-
-
 		self.parse_queue = queue()
-		self.db_queue = queue()
+		self.database_queue = queue()
 
-		self.workers = workers
+		self.crawl_handler = None
+		self.parse_handler = None
+		self.database_handler = None
 
+		self.crawl_workers = []
+		self.parse_workers = []
+		self.database_workers = []
 
-
-	async def run_crawler(self, client_session):
-		print("Setting up..")
-
-		workers = [asyncio.create_task(self.worker(worker_num)) for worker_num in range(self.workers)]
-		workers += [asyncio.create_task(db_worker(client_session, self.db_queue, self.log)) for _ in range(self.workers // 2)]
-		workers  += [asyncio.create_task(parse_worker(self.parse_queue, self.link_queue, self.db_queue)) for _ in range(self.workers // 2)] 
-		
-		workers.append(asyncio.create_task(self.shuffle_handler()))
-
-		try:
-			await asyncio.gather(*workers)
-		except asyncio.CancelledError:
-			pass    
-		
-
-	async def worker(self, worker_num):
-		while True:
-			if self.log.crawled <= self.max_crawl:
-				try:
-					await self.get_page(worker_num)
-				except asyncio.CancelledError:
-					break
-
-			elif self.log.crawled >= self.max_crawl and not self.link_queue.empty():
-				try:
-					await self.get_page(worker_num)
-				except asyncio.CancelledError:
-					break
-
-			else:
-				for task in asyncio.all_tasks(): #kill all other workers
-					task.cancel()
-				break
-		
-
-	async def get_page(self, worker_num):
-		url = await self.link_queue.get()
-		domain = to_domain(url)
-
-		if domain == "https://" or domain == "http://": #invalid domain
-			self.link_queue.task_done()
-			print('exited')
-			return None
-
-		try:
-			robot_rules = await check_robots(self.client, domain, self.domain_robot_rules, self.response_headers)
-			if cannot_fetch(url, robot_rules):
-				return None
-
-			lock = get_domain_lock(url, self.domain_locks)
-			async with lock:
-				sleep_time = get_sleep_time(domain, self.domain_wait_times)
-				if sleep_time:
-					print(sleep_time)
-					await asyncio.sleep(sleep_time)
-
-				try:
-					async with self.client.get(url, allow_redirects=True, headers=self.response_headers) as response:
-						if not self.filter_response(response.headers):
-							return None
-
-						get_rate_limits(response, url, robot_rules, self.domain_wait_times)
-						text = await response.text(encoding='utf-8')
-						await self.parse_queue.put(page_info(url, text))
-
-						self.log.update(visited=url)
-				except Exception as e:
-					silent_log(e, "get_page-request", [url, domain])
-
-			self.log.inc(crawl=True)
-		except Exception as e:
-			silent_log(e, "get_page", [url, domain])
-			return None
-
-		finally:
-			self.link_queue.task_done()
-
-
-	def filter_response(self, headers): 
-		if int(headers.get("Content-Length", 0)) > self.max_response_size:
-			return False
-
-		content_type = headers.get('Content-Type')
-		content_lang = headers.get('Content-Language')
-
-		if content_type and ("text/html" not in content_type):
-			return False
-
-		if content_lang and ("en" not in content_lang):
-			return False
-
-		return True
-
+		self.worker_manager = asyncio.create_task(self.manager())
+		self.log = log_info()
 	
-	async def shuffle_handler(self):
-		while True:
+
+	async def run(self, workers : int, starting_urls: list, request_timeout : int = 8, tcp_limit : int = 60):
+		timeout = aiohttp.ClientTimeout(total=request_timeout)
+		conn = aiohttp.TCPConnector(limit_per_host=tcp_limit)
+
+		async with aiohttp.ClientSession(timeout=timeout, connector=conn, max_line_size=8190 * 2, max_field_size=8190 * 2) as client:
+			self.crawl_handler = webcrawler(client, self.link_queue, self.parse_queue, self.log)
+
+			for url in starting_urls:
+				self.link_queue.put(url)
+			await self.link_queue.shuffle()
+
+			self.parse_handler = parser(self.link_queue, self.parse_queue, self.database_queue)
+
+			self.database_handler = database_handler(self.database_queue, self.log)
+			await self.database_handler.connect_to_db(workers)
+
+			self.crawl_workers = [asyncio.create_task(self.crawl_handler.worker()) for _ in range(workers)]
+			self.crawl_workers.append(asyncio.create_task(self.crawl_handler.shuffle_handler()))
+			self.parse_workers = [asyncio.create_task(self.parse_handler.worker()) for _ in range(workers // 2)]
+			self.database_workers = [asyncio.create_task(self.database_handler.worker()) for _ in range(workers // 2)]
+
 			try:
-				if self.log.crawled < 2:
-					await asyncio.sleep(1)
-					await self.link_queue.shuffle()
-				else:
-					await asyncio.sleep(5)
-					await self.link_queue.shuffle()
-					self.log.display()
+				await asyncio.gather(*self.crawl_workers, *self.parse_workers, *self.database_workers, self.worker_manager)
 			except asyncio.CancelledError:
-				break
-
-	async def add_links(self, urls):
-		for url in urls:
-			self.link_queue.put(url)
-		
-		await self.link_queue.shuffle()
+				pass    
 	
+	
+	async def manager(self):
+		'''Manages and kills workers'''
+
+		while self.log.crawled < self.crawl_handler.max_crawl:
+			await asyncio.sleep(5)
+			self.log.display()
+		self.parse_handler.adding_new_links = False
+
+		while (not self.link_queue.empty()) or (not self.parse_queue.empty()):
+			await asyncio.sleep(1)
+
+		self.parse_handler.cancelled = True
+		self.crawl_handler.cancelled = True
+
+		while not self.database_queue.empty():
+			await asyncio.sleep(1)
+		self.database_handler.cancelled = True
+
+
 
 async def main():
-	start_urls = ["https://nodejs.org/en"]
+	start_urls = ["https://code.visualstudio.com/"]
 	start = time.perf_counter()
 
-	workers = 35
-
-	timeout = aiohttp.ClientTimeout(total=8)
-	database_session = await connect_to_db(workers)
-
-	conn = aiohttp.TCPConnector(limit_per_host=60)
-	async with aiohttp.ClientSession(timeout=timeout, connector=conn, max_line_size=8190 * 2, max_field_size=8190 * 2) as client:
-		crawler = webcrawler(client, workers)
-		await crawler.add_links(start_urls)
-		await crawler.run_crawler(database_session)
+	s = spider()	
+	await s.run(workers=35, starting_urls=start_urls)
 
 	print(time.perf_counter() - start)
 

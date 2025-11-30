@@ -14,65 +14,95 @@ class robotsTxt:
         self.request_rate = request_rate
 
 
-async def check_robots(client, domain: str, robot_dict: dict, headers: dict):
-    r_parser = urllib.robotparser.RobotFileParser()
-    robots_text = None
+class rate_limiter:
+    def __init__(self, client, headers):
+        self.client = client
+        self.headers = headers
 
-    #check if this has already been grabbed
-    if domain in robot_dict.keys():
-        return robot_dict[domain]
-    
-    robots_url = domain + "/robots.txt"
-    try:
-        async with client.get(robots_url, allow_redirects=True, headers=headers) as response:   
-            if not response.ok:
-                robot_dict[domain] = None
-                return
-
-            robots_text = await response.text()
-
-            if not robots_text:
-                robot_dict[domain] = None
-                return 
-
-            lines = robots_text.splitlines()
-            r_parser.parse(lines)
-                    
-            #get rate-limits to not get banned by websites
-            crawl_delay = r_parser.crawl_delay(headers["User-Agent"])
-            request_rate = r_parser.request_rate(headers["User-Agent"])
-
-            if request_rate:
-                request_rate = request_rate.seconds / request_rate.requests
-
-            robot_dict[domain] = robotsTxt(r_parser, crawl_delay, request_rate)
-
-            return robot_dict[domain]
-
-    except Exception as e:
-        silent_log(e, "check_robots")
-        robot_dict[domain] = None
+        self.domain_locks = {}
+        self.domain_wait_times = {}
+        self.domain_robot_rules = {}
 
 
-def cannot_fetch(url, robot_rules):
-    return robot_rules and (not robot_rules.parser.can_fetch("*", url))
+    async def check_robots(self, domain: str):
+        r_parser = urllib.robotparser.RobotFileParser()
+        robots_text = None
+
+        #check if this has already been grabbed
+        if domain in self.domain_robot_rules.keys():
+            return self.domain_robot_rules[domain]
+        
+        robots_url = domain + "/robots.txt"
+        try:
+            async with self.client.get(robots_url, allow_redirects=True, headers=self.headers) as response:   
+                if not response.ok:
+                    self.domain_robot_rules[domain] = None
+                    return
+
+                robots_text = await response.text()
+
+                if not robots_text:
+                    self.domain_robot_rules[domain] = None
+                    return 
+
+                lines = robots_text.splitlines()
+                r_parser.parse(lines)
+                        
+                #get rate-limits to not get banned by websites
+                crawl_delay = r_parser.crawl_delay(self.headers["User-Agent"])
+                request_rate = r_parser.request_rate(self.headers["User-Agent"])
+
+                if request_rate:
+                    request_rate = request_rate.seconds / request_rate.requests
+
+                self.domain_robot_rules[domain] = robotsTxt(r_parser, crawl_delay, request_rate)
+
+                return self.domain_robot_rules[domain]
+
+        except Exception as e:
+            silent_log(e, "check_robots")
+            self.domain_robot_rules[domain] = None
 
 
-def get_rate_limits(response, url, robot_rules, domain_wait_times):
-    domain = to_top_domain(url)
+    def set_rate_limits(self, response, url, robot_rules):
+        domain = to_top_domain(url)
 
-    response_limit = get_rate_limit_from_response(response)
-    if response_limit:
-        domain_wait_times[domain] = response_limit
-        return
+        response_limit = get_rate_limit_from_response(response)
+        if response_limit:
+            self.domain_wait_times[domain] = response_limit
+            return
 
-    robots_limit = get_rate_limit_from_robots(robot_rules)
-    if robots_limit:
-        domain_wait_times[domain] = robots_limit
-        return
+        robots_limit = get_rate_limit_from_robots(robot_rules)
+        if robots_limit:
+            self.domain_wait_times[domain] = robots_limit
+            return
 
-    fallback_wait = 200
-    domain_wait_times[domain] = datetime.now(timezone.utc) + timedelta(milliseconds=fallback_wait)
+        fallback_wait = 200
+        self.domain_wait_times[domain] = datetime.now(timezone.utc) + timedelta(milliseconds=fallback_wait)
+
+
+    def get_domain_lock(self, url):
+        domain = to_top_domain(url)
+
+        if domain not in self.domain_locks.keys():
+            domain_lock = lock()
+            self.domain_locks[domain] = domain_lock
+
+        return self.domain_locks[domain]
+
+
+    def get_sleep_time(self, domain):
+        if domain not in self.domain_wait_times.keys():
+            return 0
+
+        now = datetime.now(timezone.utc)
+        sleep_time = (self.domain_wait_times[domain] - now)
+        sleep_seconds = sleep_time.total_seconds()
+
+        if sleep_seconds > 0.05:
+            return sleep_seconds
+        else:
+            return 0
 
 
 def get_rate_limit_from_response(response):
@@ -116,27 +146,6 @@ def get_rate_limit_from_robots(robot_rules):
     wait_time = datetime.now(timezone.utc) + timedelta(milliseconds=int(wait_time * 1000))
     return wait_time
 
-
-def get_domain_lock(url, domain_locks):
-    domain = to_top_domain(url)
-
-    if domain not in domain_locks.keys():
-        domain_lock = lock()
-        domain_locks[domain] = domain_lock
-
-    return domain_locks[domain]
-
-
-def get_sleep_time(domain, domain_wait_times):
-    if domain not in domain_wait_times.keys():
-        return 0
-
-    now = datetime.now(timezone.utc)
-    sleep_time = (domain_wait_times[domain] - now)
-    sleep_seconds = sleep_time.total_seconds()
-
-    if sleep_seconds > 0.05:
-        return sleep_seconds
-    else:
-        return 0
-        
+    
+def cannot_fetch(url, robot_rules):
+    return robot_rules and (not robot_rules.parser.can_fetch("*", url))

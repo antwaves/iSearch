@@ -7,9 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from selectolax.lexbor import LexborHTMLParser
 
 from db import db_info
-from util import unique_queue, silent_log
-
-#TODO: REFACTOR IN A CLASS???
+from util import queue, silent_log
 
 executor = ThreadPoolExecutor()
 
@@ -22,44 +20,51 @@ class page_info:
         return f"{self.url} with a content character length of {len(self.content)}"
 
 
-async def parse_worker(parse_queue, link_queue, db_queue):
-    while True:
+class parser:
+    def __init__(self, link_queue, parse_queue, db_queue):
+        self.cancelled = False
+        self.adding_new_links = True
+
+        self.link_queue = link_queue
+        self.parse_queue = parse_queue
+        self.db_queue = db_queue
+
+
+    async def worker(self):
+        while not self.cancelled:      
+            page_info = await self.parse_queue.get()
+            await self.add_page_to_db(page_info)
+
+
+    async def add_page_to_db(self, page_info):
         try:
-            page_info = await parse_queue.get()
-            await add_page(page_info, parse_queue, link_queue, db_queue)
-        except asyncio.CancelledError:
-            break
-
-
-async def run_parser(page_info):
-    run_loop = asyncio.get_running_loop()
-    return await run_loop.run_in_executor(executor, parse_page, page_info.content, page_info.url)
-    
-
-async def add_page(page_info, parse_queue, link_queue, db_queue):
-    try:
-        text, outlinks = await run_parser(page_info)
-    
-        if not text:
-            return 
+            text, outlinks = await self.run_parse_page(page_info)
         
-        for link in outlinks:
-            link_queue.put(link)
-        
-        url = page_info.url.replace('\x00', '')
-        url = clean_link(url)
-        text = text.replace('\x00', '')
+            if not text:
+                return 
+            
+            for link in outlinks:
+                self.link_queue.put(link)
+            
+            url = page_info.url.replace('\x00', '')
+            url = clean_link(url)
+            text = text.replace('\x00', '')
 
-        await db_queue.put(db_info(page_info.url, text, outlinks))
+            await self.db_queue.put(db_info(page_info.url, text, outlinks))
 
-    except Exception as e:
-        silent_log(e, "add_page")
+        except Exception as e:
+            silent_log(e, "add_page")
 
-    finally: 
-        parse_queue.task_done()    
+        finally: 
+            self.parse_queue.task_done()    
 
 
-def parse_page(content, base_url):
+    async def run_parse_page(self, page_info):
+        run_loop = asyncio.get_running_loop()
+        return await run_loop.run_in_executor(executor, parse_page, page_info.content, page_info.url, self.adding_new_links)
+
+
+def parse_page(content, base_url, adding_new_links):
     tree = LexborHTMLParser(content)
 
     if not tree:
@@ -68,31 +73,32 @@ def parse_page(content, base_url):
     tree.strip_tags(['style', 'script'])
     
     outlinks = []
-    for node in tree.css("a"):
-        link = node.attributes.get("href")
-        if not link:
-            continue
+    if adding_new_links:
+        for node in tree.css("a"):
+            link = node.attributes.get("href")
+            if not link:
+                continue
 
-        link = link.rstrip("/")
+            link = link.rstrip("/")
 
-        if link.endswith((".jpg", ".png", ".pdf", ".css", ".js", ".zip", ".exe")):
-            continue
-    
-        if "mailto@" in link or "mailto:" in link or "tel:" in link:
-            continue
+            if link.endswith((".jpg", ".png", ".pdf", ".css", ".js", ".zip", ".exe")):
+                continue
+        
+            if "mailto@" in link or "mailto:" in link or "tel:" in link:
+                continue
 
-        if "#" in link:
-            link = link.split("#")[0]
-    
-        if "https://" in link:
-            outlinks.append(link)
-        else:
-            link = urljoin(base_url, link)
-            outlinks.append(link)
+            if "#" in link:
+                link = link.split("#")[0]
+        
+            if "https://" in link:
+                outlinks.append(link)
+            else:
+                link = urljoin(base_url, link)
+                outlinks.append(link)
 
     text = tree.text(strip=True)
     return (text, outlinks)
-    
+
 
 def clean_link(link):
     #removes tracking parameters 

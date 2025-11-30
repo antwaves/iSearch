@@ -48,6 +48,9 @@ class queue:
     def length(self):
         return self.queue._qsize()
 
+    def empty(self) -> bool:
+        return self.queue.isEmpty()
+
 
 class unique_queue:
     def __init__(self):
