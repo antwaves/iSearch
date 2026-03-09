@@ -22,7 +22,7 @@ Base = declarative_base()
 
 
 page_links = Table(
-    "links",
+    "page_outlinks",
     Base.metadata,
     Column("target_page_id", INTEGER, ForeignKey('pages.page_id'), primary_key=True),
     Column("source_page_id", INTEGER, ForeignKey('pages.page_id'), primary_key=True),
@@ -115,8 +115,8 @@ async def get_term_ids(session, term_info):
     chunk, values = [], [{"term": item[0], "total_pages": item[1]} for item in term_info]
 
     while values:
-        length = len(values)
-        chunk, values = values[:min(MAX_PARAMS, length)], values[min(MAX_PARAMS, length):]
+        length = min(MAX_PARAMS, len(values))
+        chunk, values = values[:length], values[length:]
 
         term_insert = insert(Term).values(chunk)
         term_insert = term_insert.on_conflict_do_update(index_elements=[Term.term], set_={"total_pages": term_insert.excluded.total_pages})
@@ -124,7 +124,6 @@ async def get_term_ids(session, term_info):
         result = await session.execute(term_insert)
 
         ids.extend(result.all())
-
         await session.commit()
 
     return ids
@@ -150,3 +149,4 @@ async def retrieve_term_pages(session, term_str):
     if term:
         for page in term.pages:
             print(page.page_url)
+            print(page.page_content)

@@ -55,7 +55,7 @@ class index_handler:
                 if numbers > 5 and numbers + 1 < length // 2:
                     continue
             final_terms.append(term)
-            
+
         return final_terms
     
 
@@ -73,6 +73,7 @@ class index_handler:
                 except asyncio.CancelledError:
                     await session.commit()
                     break
+                
                 except Exception as e:
                     print(e)
 
@@ -98,7 +99,6 @@ class index_handler:
             await get_pages(session, self.pages_to_index)
             print("Getting page data...")
 
-            i = 0
             for p in iter(self.pages_to_index):
                 page = page_info(p[0], p[1])
 
@@ -107,10 +107,7 @@ class index_handler:
                 term_counts = Counter(terms)
                 for term, count in term_counts.items():
                     self.term_dict.setdefault(term, []).append(page.id)
-
-                i += 1
-                if i % 50 == 0:
-                    print(f"Processed {i} pages {" " * 10} \r", end="")          
+  
 
             for term, pages in self.term_dict.items():
                 t_length, p_length = len(term), len(pages)
@@ -128,30 +125,34 @@ class index_handler:
             self.terms = [[item[0], item[1]] for item in self.term_info]
             term_ids = await get_term_ids(session, self.term_info)
 
-            #creates list of inserts
-            print("Creating term-page links")
-            values = []
-            for term, term_id in iter(term_ids):
-                row = [{"term_id": term_id, "page_id": p_id} for p_id in self.term_dict[term]]
-                values.extend(row)
+            # #creates list of inserts
+            # print("Creating term-page links")
+            # values = []
+            # for term, term_id in iter(term_ids):
+            #     row = [{"term_id": term_id, "page_id": p_id} for p_id in self.term_dict[term]]
+            #     values.extend(row)
             
-            #chunk inserts
-            chunk = []
-            while values:
-                length = len(values)
-                chunk, values = values[:min(MAX_PARAMS, length)], values[min(MAX_PARAMS, length):]
-                await self.insert_chunks.put(chunk)
+            # #chunk inserts
+            # chunk = []
+            # while values:
+            #     length = len(values)
+            #     chunk, values = values[:min(MAX_PARAMS, length)], values[min(MAX_PARAMS, length):]
+            #     await self.insert_chunks.put(chunk)
                     
-        print("Adding term-page links")       
-        print(f"{self.insert_chunks.length()} total chunks") 
-        workers = [asyncio.create_task(self.worker(worker_num, session_maker)) for worker_num in range(self.workers)]  
 
-        try:
-            workers += await asyncio.create_task(self.log_worker())
-        except TypeError:
-            pass
+        # print("Adding term-page links")       
+        # print(f"{self.insert_chunks.length()} total chunks") 
+        # workers = [asyncio.create_task(self.worker(worker_num, session_maker)) for worker_num in range(self.workers)]  
 
-        await asyncio.gather(*workers)      
+        # try:
+        #     workers += await asyncio.create_task(self.log_worker())
+        # except TypeError: #what the fuck?
+        #     pass
+
+        # try:
+        #     await asyncio.gather(*workers)      
+        # except asyncio.exceptions.CancelledError:
+        #     pass
 
         t = ""
         while t != "(quit)":
@@ -160,6 +161,7 @@ class index_handler:
             await retrieve_term_pages(session, t)           
 
 
+#what the fuck
 async def main():
     workers = 30
 
