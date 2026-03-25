@@ -6,7 +6,7 @@ from collections import Counter
 import traceback
 import os
 
-from indexer_util.util import queue
+from queues import queue
 from db import connect_to_db, get_pages, get_term_ids, add_chunk
 
 

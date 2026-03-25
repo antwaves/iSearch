@@ -8,7 +8,7 @@ import aiohttp
 from spider.crawler import webcrawler
 from spider.page_parser import parser
 from db import database_handler
-from spider.util import queue, unique_queue
+from queues import jqueue, unique_queue
 
 
 
@@ -16,8 +16,8 @@ class spider:
 	''' Class responsibile for handling crawling, parsing and writing to postgres. '''
 	def __init__(self):
 		self.link_queue = unique_queue()
-		self.parse_queue = queue()
-		self.database_queue = queue()
+		self.parse_queue = jqueue()
+		self.database_queue = jqueue()
 
 		#init these later
 		self.crawl_handler = None

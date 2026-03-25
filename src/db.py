@@ -33,7 +33,7 @@ term_links = Table(
     Column("term_id", INTEGER, ForeignKey("terms.term_id"), primary_key=True),
     Column("page_id", INTEGER, ForeignKey("pages.page_id"), primary_key=True),
     schema = 'public'
-)
+    )
 
 
 class Page(Base):
