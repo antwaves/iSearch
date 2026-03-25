@@ -6,8 +6,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from selectolax.lexbor import LexborHTMLParser
 
-from db import db_info
-from util import queue, silent_log
+from spider.util import queue, silent_log
+
 
 class page_info:
     def __init__(self, url, content):
@@ -20,7 +20,6 @@ class page_info:
 
 class parser:
     def __init__(self, link_queue, parse_queue, db_queue, workers : int):
-        self.cancelled = False
         self.adding_new_links = True
         self.executor = ThreadPoolExecutor(workers)
 
@@ -29,8 +28,11 @@ class parser:
         self.db_queue = db_queue
 
 
+    def still_running(self):
+        return self.adding_new_links or not self.parse_queue.empty()
+
     async def worker(self):
-        while not self.cancelled:      
+        while self.still_running():      
             page_info = await self.parse_queue.get()
             await self.add_page_to_db(page_info)
 
@@ -49,7 +51,7 @@ class parser:
             url = clean_link(url)
             text = text.replace('\x00', '')
 
-            await self.db_queue.put(db_info(page_info.url, text, outlinks))
+            await self.db_queue.put((page_info.url, text, outlinks))
 
         except Exception as e:
             silent_log(e, "add_page")
@@ -63,7 +65,7 @@ class parser:
         return await run_loop.run_in_executor(self.executor, parse_page, page_info.content, page_info.url, self.adding_new_links)
 
 
-def parse_page(content, base_url, adding_new_links):
+def parse_page(content, base_url: str, adding_new_links: bool):
     tree = LexborHTMLParser(content)
 
     if not tree:
@@ -99,8 +101,8 @@ def parse_page(content, base_url, adding_new_links):
     return (text, outlinks)
 
 
-def clean_link(link):
-    #removes tracking parameters 
+def clean_link(link: str):
+    ''' Removes tracking parameters from a given link '''
 
     blocked_params = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', "e",
                     'ref', "source", "ref_source", '_hsfp', '_hssc', '_hstc', 'gclid', 'fbclid']

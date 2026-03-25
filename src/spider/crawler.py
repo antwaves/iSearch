@@ -7,41 +7,44 @@ import asyncio
 import aiohttp
 from dotenv import load_dotenv
 
-from page_parser import page_info
-from rate_limit import (rate_limiter, get_rate_limit_from_response, 
+from spider.page_parser import page_info
+from spider.rate_limit import (rate_limiter, get_rate_limit_from_response, 
 						get_rate_limit_from_robots, cannot_fetch)
-from util import queue, to_domain, unique_queue, log_info, silent_log
+from spider.util import queue, to_domain, unique_queue, silent_log
 
 #and cchardet and pip-system-certs
 
-t = time.perf_counter()
 
 #TODO: REFACTOR IT ALLLLLLLLLL
-
 class webcrawler:
-	def __init__(self, client, link_queue, parse_queue, log):
-		self.client = client
+	''' Class responsible for crawling. Using an async session provided by the spider, visits (and filters through) pages, and gives their content
+		to the page parser. Page parser gives back outlinks which are then visited.'''
+
+	def __init__(self, request_client, link_queue, parse_queue):
+		self.request_client = request_client 
 		self.link_queue = link_queue
 		self.parse_queue = parse_queue
 
-		self.max_crawl = 10000
-		self.max_response_size = 5 * 1024 * 1024  
+		self.crawled = 0
+		self.max_crawl = 100
 
 		load_dotenv()
 		email = os.getenv("CONTACT_EMAIL")
-
 		self.response_headers = {f'User-Agent': 'iSearchBot/1.0 (https://github.com/antwaves/iSearch; {email}) aiohttp/3.13.3',
 								'Accept-Language' : 'en-US,en;q=0.9', 'Accept' : '*/*', "Cache-Control" : "max-age=0"}		
-		self.log = log
+		self.max_response_size = 5 * 1024 * 1024  
 
-		self.rate_limiter = rate_limiter(client, self.response_headers)
-		self.cancelled = False
+		self.rate_limiter = rate_limiter(request_client, self.response_headers)
+
+
+	def still_running(self):
+		return self.crawled <= self.max_crawl
 
 
 	async def worker(self):
-		while not self.cancelled:
-			await self.get_page()
-		
+		while self.still_running():
+			await self.get_page()		
+
 
 	async def get_page(self):
 		url = await self.link_queue.get()
@@ -63,20 +66,17 @@ class webcrawler:
 					await asyncio.sleep(sleep_time)
 
 				try:
-					async with self.client.get(url, allow_redirects=True, headers=self.response_headers) as response:
+					async with self.request_client.get(url, allow_redirects=True, headers=self.response_headers) as response:
 						if not self.filter_response(response.headers):
 							return None
 
 						self.rate_limiter.set_rate_limits(response, url, robot_rules)
 						text = await response.text(encoding='utf-8', errors='replace')
 						await self.parse_queue.put(page_info(url, text))
-
-						self.log.update(visited=url)
-						
+					
+					self.crawled += 1
 				except Exception as e:
 					silent_log(e, "get_page-request", [url, domain])
-
-			self.log.inc(crawl=True)
 
 		except Exception as e:
 			silent_log(e, "get_page", [url, domain])
@@ -104,8 +104,8 @@ class webcrawler:
 	
 	async def shuffle_handler(self):
 		try:
-			while not self.cancelled:
-				if self.log.crawled < 2:
+			while self.still_running():
+				if self.crawled < 2:
 					await asyncio.sleep(1)
 					await self.link_queue.shuffle()
 				else:

@@ -4,7 +4,7 @@ import urllib.robotparser
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
-from util import to_top_domain, lock, silent_log
+from spider.util import to_top_domain, lock, silent_log
 
 
 class robotsTxt:
