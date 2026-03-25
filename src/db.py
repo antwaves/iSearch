@@ -15,6 +15,7 @@ from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
 from sqlalchemy.sql import func
 
 
+
 Base = declarative_base()
 
 page_links = Table(
@@ -111,7 +112,7 @@ class database_handler:
 
 
     def still_running(self):
-        return self.being_added_to and self.database_queue.empty()
+        return self.being_added_to or not self.database_queue.empty()
 
 
     async def connect_to_db(self, request_pool_size):
@@ -128,11 +129,11 @@ class database_handler:
                         await create_page(session, page_info)
 
                     except asyncio.CancelledError:
+                        await session.commit()
                         break
 
                     except Exception as e:
                         print("Exception in db worker", e)
-
         except Exception as e:
             print("DB worker's session threw an exception with error:", e)
 
@@ -179,21 +180,6 @@ async def create_page(session: AsyncSession, page_info):
 
 
 # ----------------- FOR INDEXER  -----------------
-async def get_pages(session):
-    pages = []
-
-    stmt = select(Page).where(Page.page_content != None)
-    result = await session.scalars(stmt) 
-
-    i = 0
-    for page in result:
-        i += 1
-        if i % 100 == 0:
-            print(f"Got {i} pages {" " * 10} \r", end="")
-        pages.append([page.page_id, page.page_content])
-    return pages
-
-
 async def get_term_ids(session, term_info, max_params):
     ids = []
     chunk, values = [], [{"term": item[0], "total_pages": item[1]} for item in term_info.items()]
@@ -217,7 +203,7 @@ async def add_chunk(session, chunk):
     try:
         chunk_insert = insert(term_links).values(chunk)
         chunk_insert = chunk_insert.on_conflict_do_nothing(index_elements=[term_links.c.term_id, term_links.c.page_id])
-        x = await session.execute(chunk_insert)
+        await session.execute(chunk_insert)
 
     except Exception as e:
         print(f"Exception in add chunk")
@@ -233,3 +219,20 @@ async def retrieve_term_pages(session, term_str):
     if term:
         for page in term.pages:
             print(page.page_url)
+
+
+# ----------------- FOR QUERY ENGINE -----------------
+
+async def get_pages(session):
+    pages = []
+
+    stmt = select(Page).where(Page.page_content != None)
+    result = await session.scalars(stmt) 
+
+    i = 0
+    for page in result:
+        i += 1
+        if i % 100 == 0:
+            print(f"Got {i} pages {" " * 10} \r", end="")
+        pages.append([page.page_id, page.page_content])
+    return pages

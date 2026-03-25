@@ -60,7 +60,7 @@ class rate_limiter:
                 return self.domain_robot_rules[domain]
 
         except Exception as e:
-            silent_log(e, "check_robots")
+            silent_log(e, f"check_robots: {robots_url}")
             self.domain_robot_rules[domain] = None
 
 

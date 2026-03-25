@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from spider.page_parser import page_info
 from spider.rate_limit import (rate_limiter, get_rate_limit_from_response, 
 						get_rate_limit_from_robots, cannot_fetch)
-from spider.util import queue, to_domain, unique_queue, silent_log
+from spider.util import to_domain, silent_log
 
 #and cchardet and pip-system-certs
 
@@ -26,7 +26,7 @@ class webcrawler:
 		self.parse_queue = parse_queue
 
 		self.crawled = 0
-		self.max_crawl = 100
+		self.max_crawl = 100000
 
 		load_dotenv()
 		email = os.getenv("CONTACT_EMAIL")
@@ -103,14 +103,22 @@ class webcrawler:
 
 	
 	async def shuffle_handler(self):
+		t = time.time()
 		try:
 			while self.still_running():
 				if self.crawled < 2:
 					await asyncio.sleep(1)
 					await self.link_queue.shuffle()
 				else:
-					await asyncio.sleep(5)
+					seconds_elapsed = time.time() - t
+					sleep_time = (5 + (0.07 * seconds_elapsed))
+					await asyncio.sleep(sleep_time)
+
+					print(f"{"\n" * 3}Shuffling")
 					await self.link_queue.shuffle()
+					print(time.time() - t, "seconds elapsed")
+					print(f"Sleep time is {sleep_time}")
+					print(f"{self.crawled} pages crawled{'\n' * 3}")
 
 		except Exception as e:
 			silent_log(e, "shuffle_handler")

@@ -85,18 +85,16 @@ class unique_queue:
 
     async def shuffle(self):
         try:
-            print("Shuffling")
             self.shuffle_queue.extend(self.queue._queue)
             self.queue._queue = deque()
 
-            size = min(len(self.shuffle_queue), 10000)
+            size = min(len(self.shuffle_queue), 15000)
             temp_queue = deque(itertools.islice(self.shuffle_queue, 0, size))
             leftover = deque(itertools.islice(self.shuffle_queue, size, len(self.shuffle_queue)))
 
             domains = set()
             domain_pages = {}
 
-            domain_pages = {}
             for link in temp_queue:
                 domain = to_top_domain(link)
                 domain_pages.setdefault(domain, deque()).append(link)

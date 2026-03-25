@@ -1,5 +1,6 @@
 import time
 import traceback
+import random
 
 import asyncio
 import aiohttp
@@ -8,6 +9,7 @@ from spider.crawler import webcrawler
 from spider.page_parser import parser
 from db import database_handler
 from spider.util import queue, unique_queue
+
 
 
 class spider:
@@ -88,6 +90,7 @@ async def main():
 		lines = f.readlines()
 		lines = [line.strip() for line in lines]
 	start_urls = [line for line in lines if line != "\n"]
+	random.shuffle(start_urls)
 	start = time.perf_counter()
 
 	#TODO, figure out the optimal split up of workers

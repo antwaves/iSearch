@@ -6,8 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from selectolax.lexbor import LexborHTMLParser
 
-from spider.util import queue, silent_log
-
+from spider.util import silent_log 
 
 class page_info:
     def __init__(self, url, content):
@@ -70,8 +69,6 @@ def parse_page(content, base_url: str, adding_new_links: bool):
 
     if not tree:
         return (None, None)
-
-    tree.strip_tags(['style', 'script'])
     
     outlinks = []
     if adding_new_links:
@@ -97,7 +94,11 @@ def parse_page(content, base_url: str, adding_new_links: bool):
                 link = urljoin(base_url, link)
                 outlinks.append(link)
 
-    text = tree.text(strip=True)
+    #get text, remove trailing whitespace, including that which is inbetween words and remove other non-essential stuff
+    tree.strip_tags(['style', 'script', 'head', 'title', 'meta', '[document]'])
+    text = tree.text(separator=' ')
+    text = " ".join(text.split())
+
     return (text, outlinks)
 
 

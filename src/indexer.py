@@ -6,12 +6,34 @@ from collections import Counter
 import traceback
 import os
 
-from indexer_util.util import queue, page_info, term_data
-from db import connect_to_db, get_pages, get_term_ids, add_chunk, retrieve_term_pages
+from indexer_util.util import queue
+from db import connect_to_db, get_pages, get_term_ids, add_chunk
 
 
 
 MAX_PARAMS = 15000
+
+class page_info:
+    #contains page id and content
+    def __init__(self, id, content):
+        self.id = id
+        self.content = content
+
+    def __repr__(self):
+        return f"page id {self.id}"
+
+
+class term_data:
+    #contains the total occurences of a list of terms, also link said terms back to their orginal pages
+    def __init__(self):
+        self.pages = []
+    
+    def add(self, page):
+        self.pages.append(page)
+
+    def __repr__(self):
+        return f"{len(self.pages)} total pages and {len(pages)} total occurring pages"
+
        
 class index_handler:
     def __init__(self, workers):
@@ -88,12 +110,8 @@ class index_handler:
             await asyncio.gather(*workers)      
         except asyncio.exceptions.CancelledError:
             pass
-
-        t = ""
-        while t != "(quit)":
-            t = input("Enter term: ")
-            os.system("cls")
-            await retrieve_term_pages(session, t)     
+        
+        print("All done!")
 
 
     async def worker(self, worker_num, session_maker):
