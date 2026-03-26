@@ -29,7 +29,7 @@ class queue:
             self.queue.task_done()
 
     def length(self) -> int:
-        return len(self.queue._queue)
+        return self.queue.qsize()
 
 
 class jqueue:

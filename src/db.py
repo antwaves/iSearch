@@ -180,7 +180,8 @@ async def create_page(session: AsyncSession, page_info):
 
 
 # ----------------- FOR INDEXER  -----------------
-async def get_term_ids(session, term_info, max_params):
+#TODO: Make this more async
+async def insert_terms(session, term_info, max_params):
     ids = []
     chunk, values = [], [{"term": item[0], "total_pages": item[1]} for item in term_info.items()]
 
@@ -211,6 +212,22 @@ async def add_chunk(session, chunk):
             f.write(f"add_chunk threw an error: {e}\n")
 
 
+async def get_pages(session, batch_size):    
+    stmt = select(Page).where(Page.page_content != None).execution_options(yield_per=100)
+    result = await session.stream_scalars(stmt)
+    batch = []
+
+    async for page in result:
+        if len(batch) < batch_size:
+            batch.append([page.page_id, page.page_content])
+        else:
+            yield batch
+            batch = []
+
+    print("Got all pages")
+
+
+# ----------------- FOR QUERY ENGINE -----------------
 async def retrieve_term_pages(session, term_str):
     stmt = select(Term).where(Term.term == term_str).options(selectinload(Term.pages))
     result = await session.execute(stmt)
@@ -219,20 +236,3 @@ async def retrieve_term_pages(session, term_str):
     if term:
         for page in term.pages:
             print(page.page_url)
-
-
-# ----------------- FOR QUERY ENGINE -----------------
-
-async def get_pages(session):
-    pages = []
-
-    stmt = select(Page).where(Page.page_content != None)
-    result = await session.scalars(stmt) 
-
-    i = 0
-    for page in result:
-        i += 1
-        if i % 100 == 0:
-            print(f"Got {i} pages {" " * 10} \r", end="")
-        pages.append([page.page_id, page.page_content])
-    return pages
