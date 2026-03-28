@@ -14,6 +14,8 @@ from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
                             relationship, selectinload, sessionmaker, load_only)
 from sqlalchemy.sql import func
 
+#remove me!
+import time
 
 
 Base = declarative_base()
@@ -180,11 +182,14 @@ async def create_page(session: AsyncSession, page_info):
 
 
 # ----------------- FOR INDEXER  -----------------
-#TODO: Make this more async
+#TODO: total pages is broken.. fix it
 async def insert_terms(session, term_info, max_params):
+    j = time.time()
     ids = []
-    chunk, values = [], [{"term": item[0], "total_pages": item[1]} for item in term_info.items()]
+    chunk, values = [], [{"term": item[0], "total_pages": len(item[1])} for item in term_info.items()]
+    print(f"Took {time.time() - j} seconds for prep")
 
+    t = time.time()
     while values:
         length = min(max_params, len(values))
         chunk, values = values[:length], values[length:]
@@ -195,10 +200,10 @@ async def insert_terms(session, term_info, max_params):
         result = await session.execute(term_insert)
 
         ids.extend(result.all())
-        await session.commit()
-
+        
+    await session.commit()
+    print(f"Took {time.time() - t} seconds")
     return ids
-
 
 async def add_chunk(session, chunk):
     try:
@@ -207,22 +212,26 @@ async def add_chunk(session, chunk):
         await session.execute(chunk_insert)
 
     except Exception as e:
+        await session.rollback()
         print(f"Exception in add chunk")
         with open("log.txt", "a") as f:
             f.write(f"add_chunk threw an error: {e}\n")
 
 
 async def get_pages(session, batch_size):    
-    stmt = select(Page).where(Page.page_content != None).execution_options(yield_per=100)
+    stmt = select(Page).where(Page.page_content != None).execution_options(yield_per=batch_size)
     result = await session.stream_scalars(stmt)
     batch = []
 
     async for page in result:
-        if len(batch) < batch_size:
-            batch.append([page.page_id, page.page_content])
-        else:
+        batch.append([page.page_id, page.page_content])
+
+        if len(batch) >= batch_size:
             yield batch
             batch = []
+
+    if batch:
+        yield batch
 
     print("Got all pages")
 

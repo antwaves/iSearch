@@ -6,6 +6,7 @@ from collections import Counter
 import traceback
 import os
 from concurrent.futures import ProcessPoolExecutor
+import random
 
 from queues import queue
 from db import connect_to_db, get_pages, insert_terms, add_chunk, retrieve_term_pages
@@ -46,7 +47,7 @@ class index_handler:
         self.still_inserting = True
 
         self.page_chunks = asyncio.Queue()
-        self.insert_chunks = asyncio.Queue(maxsize=self.workers)
+        self.insert_chunks = asyncio.Queue()
 
         self.insert_lock = asyncio.Lock()
         self.loop = asyncio.get_running_loop()
@@ -58,13 +59,15 @@ class index_handler:
         self.batch_size = 2000
         self.condition = asyncio.Condition()
 
+        self.current_insert_user = None
+
 
     async def run_indexer(self):
         session_maker = await connect_to_db(self.workers) 
 
         workers = [asyncio.create_task(self.term_insert_worker(session_maker)) for _ in range(self.workers // 2)]  
         workers.extend([asyncio.create_task(self.term_link_insert_worker(session_maker)) for _ in range(self.workers // 2)])
-        workers.append(asyncio.create_task(self.chunk_inserter(session_maker, batch_size=self.batch_size)))
+        workers.append(asyncio.create_task(self.page_getter(session_maker, batch_size=self.batch_size)))
 
         try:
             await asyncio.gather(*workers)      
@@ -74,11 +77,12 @@ class index_handler:
         print("All done!")
 
 
-    async def chunk_inserter(self, session_maker, batch_size):
+    async def page_getter(self, session_maker, batch_size):
         async with session_maker() as session:
             async for page in get_pages(session, batch_size=self.batch_size):
                 async with self.condition:
                     await self.condition.wait_for(lambda: self.batch_requests > 0)
+                    print("Added new batch")
                     self.batch_requests -= 1
                     await self.page_chunks.put(page)
                     
@@ -86,34 +90,55 @@ class index_handler:
 
 
     async def term_insert_worker(self, session_maker):
+        j = random.randint(1, 1000)
         try:
-           
             while self.adding_new_pages or not self.page_chunks.empty():
+
                 async with self.condition:
                     self.batch_requests += 1
                     self.condition.notify()
+
+                t = time.time()
+                print(f"Worker {j} is waiting on batch")
                 chunk = await self.page_chunks.get()
+
+                print(f"Worker {j} was waiting on a batch for {time.time() - t} seconds")
                 self.page_chunks.task_done()
 
-                term_pages, term_page_frequency = await self.loop.run_in_executor(self.pool, process_chunk, chunk, self.stopwords)
+
+                #stream out THIS data 
+                t = time.time()
+                print(f"Worker {j} is waiting on term_pages and term_page_frequency (process_chunk)")
+                term_data = await self.loop.run_in_executor(self.pool, process_chunk, chunk, self.stopwords)
                 self.indexed += self.batch_size
+                print(f"Worker {j} got term_pages and term_page_frequency. It took {time.time() - t} seconds")
 
-
+                
+                t = time.time()
+                #print(f"Worker {j} is waiting on term ids")
                 # turn the term_id stuff into ANOTHER stream to prevent pulling a bunch of stuff into memory!!!
                 async with session_maker() as session: #add a proper semaphore on the session_maker()
+                    t = time.time()
+                    print(f"Worker {j} is waiting on insert lock. Current insert user is {self.current_insert_user}")
                     async with self.insert_lock:
-                        term_ids = await insert_terms(session, term_page_frequency, MAX_PARAMS) #list containing [term, term_id] for all inserted terms 
-
+                        self.current_insert_user = j
+                        print(f"Worker {j} escapes insert_lock. Waited {time.time() - t} seconds")
+                        term_ids = await insert_terms(session, term_data, MAX_PARAMS) #list containing [term, term_id] for all inserted terms 
+                print(f"Worker {j} got term ids. It took {time.time() - t} seconds")
+                
                 term_values = []
                 for obj in term_ids:
                     length = len(term_values)
                     if length  >= MAX_PARAMS:
-                        chunk_values, temp_values = term_values[:min(MAX_PARAMS, length)], term_values[min(MAX_PARAMS, length):]     
+                        chunk_values, temp_values = term_values[:min(MAX_PARAMS, length)], term_values[min(MAX_PARAMS, length):]   
+                        #print(f"Worker {j} is WAITING on insert chunk")  
                         await self.insert_chunks.put(chunk_values)
+                        #print(f"Worker {j} added to insert_chunk")
+
                         term_values = temp_values
 
                     term, term_id = obj[0], obj[1]
-                    pages_containing_term = term_pages[term]
+                    pages_containing_term = term_data[term]
 
                     row = [{"term_id": term_id, "page_id": page_id} for page_id in pages_containing_term]
                     term_values.extend(row)
@@ -138,13 +163,14 @@ class index_handler:
         async with session_maker() as session:
             try:
                 while not self.insert_chunks.empty() or self.adding_new_pages or self.still_inserting:
+                    t = time.time()
                     if iteration % 30 == 0:
                         print("commited")
                         await session.commit()
                     chunk = await self.insert_chunks.get()
                     await add_chunk(session, chunk)
 
-                    print(f"Added chunk {self.insert_chunks.qsize()} remaining in current queue")
+                    #print(f"Added chunk {self.insert_chunks.qsize()} remaining in current queue. Took {round(time.time() - t, 4)} seconds")
                     iteration += 1
 
             except asyncio.CancelledError:
@@ -161,14 +187,13 @@ class index_handler:
         print('Finished!')
 
 
-def filter_term(term_page_frequency, term, amount_of_pages):
+def filter_term(term, amount_of_pages):
     '''Filter out terms that are both too infrequent and too long/short'''
     term_length = len(term)
     frequent_term = amount_of_pages > 20
     valid_length_term = term_length > 3 and term_length < 15
 
-    if valid_length_term or frequent_term:
-        term_page_frequency[term] = amount_of_pages
+    return valid_length_term or frequent_term
 
 
 def process_chunk(chunk, stopwords):
@@ -177,7 +202,8 @@ def process_chunk(chunk, stopwords):
     translator = str.maketrans("", "", punctuation)
     term_finder = re.compile(r"[A-Za-z0-9_-]+")
 
-    term_pages = {}
+    term_data = {} #TODO: Changes this to contain enums or something idk gang
+
     for obj in chunk:
         page = page_info(obj[0], obj[1])
         content = page.content
@@ -187,6 +213,8 @@ def process_chunk(chunk, stopwords):
         terms = term_finder.finditer(content)
 
         final_terms = []
+        terms_seen = set()
+
         for match in terms:
             term = match.group().lower()
    
@@ -202,25 +230,25 @@ def process_chunk(chunk, stopwords):
                 if vowel_amount > 7 and vowel_amount + 1 < length // 2:
                     continue
 
-                numbers = len([char for char in term if char.isdecimal()])
-                if numbers > 5 and numbers + 1 < length // 2:
-                    continue
-
             final_terms.append(term)
+            terms_seen.add(term)
         
         for term in final_terms:
-            term_pages.setdefault(term, []).append(page.id)
+            term_data.setdefault(term, []).append(page.id)
 
-    term_page_frequency = {} #key = term, value = how many pages a term appears on
-    for term, pages_containing_term in term_pages.items(): 
-        amount_of_pages = len(pages_containing_term)
-        filter_term(term_page_frequency, term, amount_of_pages)
+    
+    terms = list(term_data.keys())
+    for term in terms:
+        if not filter_term(term, len(term_data[term])): #term_data[term][1] = page frequency
+            term_data.pop(term)
 
-    return term_pages, term_page_frequency
+    return term_data
+
+
 
 
 async def main():
-    workers = 15
+    workers = 8
 
     try:
         indexer = index_handler(workers)
@@ -229,8 +257,14 @@ async def main():
         print(traceback.format_exc())
     
 
+
+
 if __name__ == "__main__":
+
+
     try:
         asyncio.run(main())
     except Exception as e:
         print(e)
+
+
