@@ -80,7 +80,6 @@ class Term(Base):
 
 async def connect_to_db(request_pool_size):
     '''Loads database and tables, returns a session object'''
-
     load_dotenv()
     user = os.getenv("USER")
     password = quote_plus(os.getenv("PASSWORD"))
@@ -184,32 +183,37 @@ async def create_page(session: AsyncSession, page_info):
 # ----------------- FOR INDEXER  -----------------
 #TODO: total pages is broken.. fix it
 async def insert_terms(session, term_info, max_params):
-    j = time.time()
     ids = []
-    chunk, values = [], [{"term": item[0], "total_pages": len(item[1])} for item in term_info.items()]
-    print(f"Took {time.time() - j} seconds for prep")
+    chunk = []
+    values =  sorted([{"term": item[0], "total_pages": len(item[1])} for item in term_info.items()],
+    key=lambda x: x["term"])
 
-    t = time.time()
+    in_stmt = insert(Term).on_conflict_do_nothing()
+
     while values:
+        print("Creating a chunk")
         length = min(max_params, len(values))
         chunk, values = values[:length], values[length:]
 
-        term_insert = insert(Term).values(chunk)
-        term_insert = term_insert.on_conflict_do_update(index_elements=[Term.term], set_={"total_pages": term_insert.excluded.total_pages})
-        term_insert = term_insert.returning(Term.term, Term.term_id)
-        result = await session.execute(term_insert)
+        t = time.time()
+        await session.execute(in_stmt, chunk)
 
+        terms = [v["term"] for v in chunk]
+        result = await session.execute(select(Term.term, Term.term_id).where(Term.term.in_(terms)))
+
+        print(f"Took {time.time() - t} seconds")
         ids.extend(result.all())
         
     await session.commit()
-    print(f"Took {time.time() - t} seconds")
     return ids
+
 
 async def add_chunk(session, chunk):
     try:
-        chunk_insert = insert(term_links).values(chunk)
-        chunk_insert = chunk_insert.on_conflict_do_nothing(index_elements=[term_links.c.term_id, term_links.c.page_id])
-        await session.execute(chunk_insert)
+        t = time.time()
+        stmt = insert(term_links).on_conflict_do_nothing(index_elements=[term_links.c.term_id, term_links.c.page_id])
+        await session.execute(stmt, chunk, execution_options={"postgresql_executemany": True})
+        print(f"Took {time.time() - t} seconds to add a chunk")
 
     except Exception as e:
         await session.rollback()
