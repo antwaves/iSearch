@@ -2,6 +2,7 @@ import os
 from urllib.parse import quote_plus
 
 import asyncpg
+from asyncpg.exceptions import DeadlockDetectedError
 import asyncio
 import sqlalchemy as sa
 from dotenv import load_dotenv
@@ -13,10 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
                             relationship, selectinload, sessionmaker, load_only)
 from sqlalchemy.sql import func
-
-#remove me!
-import time
-
 
 Base = declarative_base()
 
@@ -181,8 +178,14 @@ async def create_page(session: AsyncSession, page_info):
 
 
 # ----------------- FOR INDEXER  -----------------
-#TODO: total pages is broken.. fix it
-async def insert_terms(session, term_info, max_params):
+async def insert_terms(session, in_stmt, chunk, terms):
+    await session.execute(in_stmt, chunk)
+    result = await session.execute(select(Term.term, Term.term_id).where(Term.term.in_(terms)))
+    await session.commit()
+    return result.all()
+
+
+async def insert_terms_safe(session_maker, term_info, max_params):
     ''' Gets a set of terms from a batch, inserts them into the db and updates their total_pages column, and returns their id '''
     ids = []
     chunk = []
@@ -193,30 +196,66 @@ async def insert_terms(session, term_info, max_params):
     while term_values:
         length = min(max_params, len(term_values))
         chunk, term_values = term_values[:length], term_values[length:]
-
-        t = time.time()
-        await session.execute(in_stmt, chunk)
-
         terms = [v["term"] for v in chunk]
-        result = await session.execute(select(Term.term, Term.term_id).where(Term.term.in_(terms)))
-
-        ids.extend(result.all())
-
         
-    await session.commit()
+        async with session_maker() as session:
+            for retry in range(5):
+                try:
+                    result_ids = await insert_terms(session, in_stmt, chunk, terms)
+                    break
+
+                except DBAPIError as e:
+                    session.rollback()
+                    if isinstance(e.orig, DeadlockDetectedError):
+                        sleep_time = 0.2 * (2 ** retry)
+                        print(f"Deadlock detected in insert_terms, retry {retry+1}, sleeping {sleep_time}")
+                        await asyncio.sleep(sleep_time)
+                    else:
+                        print(f"Exception in insert_terms {e}")
+                        raise
+
+                except Exception as e:
+                    print(f"Exception in insert_terms {e}")
+                    await session.rollback()
+                    raise
+            
+            await session.close()
+
+        if result_ids:
+            ids.extend(result_ids)
+
     return ids
 
 
-async def add_chunk(session, chunk):
-    try:
-        stmt = insert(term_links).on_conflict_do_nothing(index_elements=[term_links.c.term_id, term_links.c.page_id])
-        await session.execute(stmt, chunk, execution_options={"postgresql_executemany": True})
+async def add_chunk(session, chunk, retry = 0):
+    stmt = insert(term_links).on_conflict_do_nothing(index_elements=[term_links.c.term_id, term_links.c.page_id])
+    await session.execute(stmt, chunk, execution_options={"postgresql_executemany": True})
+    await session.commit()
 
-    except Exception as e:
-        await session.rollback()
-        print(f"Exception in add chunk")
-        with open("log.txt", "a") as f:
-            f.write(f"add_chunk threw an error: {e}\n")
+
+async def add_chunk_safe(session_maker, chunk):
+    async with session_maker() as session:
+        for retry in range(5):
+            try:
+                await add_chunk(session, chunk)
+                await session.close()
+                return
+
+            except DBAPIError as e:
+                await session.rollback()
+
+                if isinstance(e.orig, DeadlockDetectedError):
+                    sleep_time = 0.2 * (2 ** retry)
+                    print(f"Deadlock detected, retry {retry+1}, sleeping {sleep_time}")
+                    await asyncio.sleep(sleep_time)
+                else:
+                    print(f"Exception in add_chunk {e}")
+                    raise
+
+            except Exception as e:
+                print(f"Exception in add_chunk {e}")
+                await session.rollback()
+                raise
 
 
 async def get_pages(session, batch_size):    

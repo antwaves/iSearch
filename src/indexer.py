@@ -11,10 +11,9 @@ import random
 from dataclasses import dataclass
 
 from queues import queue
-from db import connect_to_db, get_pages, insert_terms, add_chunk, set_term_counts, retrieve_term_pages
+from db import connect_to_db, get_pages, insert_terms_safe, add_chunk_safe, set_term_counts, retrieve_term_pages
 
-MAX_PARAMS = 15000
-SAFETY = 1000
+MAX_PARAMS = 14000
 
 
 @dataclass
@@ -56,6 +55,7 @@ class index_handler:
         self.created_batches = 0
         self.sent_batches = 0
 
+
     async def run_indexer(self):
         ''' Runs the indexer. Initalizes all workers. '''
 
@@ -71,6 +71,7 @@ class index_handler:
         except asyncio.exceptions.CancelledError:
             pass
 
+        print(self.created_batches, self.sent_batches)
         await set_term_counts(session_maker)
         print("All done!")
 
@@ -114,38 +115,32 @@ class index_handler:
                 term_data = await self.loop.run_in_executor(self.pool, process_chunk, chunk, self.stopwords)
 
                 for term_batch in batch_dict(term_data, self.batch_size):
-                    t = time.time()
-                    async with session_maker() as session: 
-                        t = time.time()
-                        async with self.semaphore:
-                            self.current_insert_user = worker_id
-                            term_ids = await insert_terms(session, term_batch, MAX_PARAMS) #list containing [term, term_id] for all inserted terms 
-                    #print(f"Worker {worker_id} got term ids. It took {time.time() - t} seconds")
+                    async with self.semaphore:
+                        self.current_insert_user = worker_id
+                        term_ids = await insert_terms_safe(session_maker, term_batch, MAX_PARAMS) #list containing [term, term_id] for all inserted terms 
                     
                     term_values = []
-                    for obj in term_ids:
-                        length = len(term_values)
-                        if length  >= MAX_PARAMS - SAFETY:
-                            chunk_values, temp_values = term_values[:min(MAX_PARAMS, length)], term_values[min(MAX_PARAMS, length):]   
+                    for term, term_id in term_ids:
+                        length = min(MAX_PARAMS, len(term_values))
+                        if length >= MAX_PARAMS:
+                            chunk_values, term_values = term_values[:length], term_values[length:]
+                            chunk_values = sorted(chunk_values, key=lambda x: x["term_id"]) #sort to avoid sharelocks
                             await self.insert_chunks.put(chunk_values)
                             self.created_batches += 1
 
-                            term_values = temp_values
-
-                        term, term_id = obj[0], obj[1]
                         pages_containing_term = term_batch[term]
 
                         row = [{"term_id": term_id, "page_id": page_id} for page_id in pages_containing_term]
                         term_values.extend(row)
- 
+
                     if term_values:
+                        term_values = sorted(term_values, key=lambda x : x['term_id']) #sort to avoid sharelocks
                         await self.insert_chunks.put(term_values)
-                        self.created_batches += 1
-                    
+                        self.created_batches += 1 
 
                 self.indexed += self.batch_size
                 print(f"Finished a batch of {self.batch_size} pages. {self.indexed} total pages done")
-
+                print(self.created_batches, self.sent_batches)
 
             if self.page_chunks.empty():
                 self.still_inserting = False
@@ -157,39 +152,26 @@ class index_handler:
             print(traceback.format_exc())
 
 
-
     async def term_link_insert_worker(self, session_maker):
         ''' Recieves term_id page_id pairs from term_inser worker and writes them to the database. '''
         iteration = 0
         chunk = None
         try:
-            async with session_maker() as session:
-                while not self.insert_chunks.empty() or self.still_inserting or await self.are_term_workers_alive(): 
-                    try:
-                        if iteration % 30 == 0:
-                            #print("Commited")
-                            await session.commit()
+            while not self.insert_chunks.empty() or self.still_inserting or await self.are_term_workers_alive(): 
+                try:
+                    chunk = await asyncio.wait_for(self.insert_chunks.get(), 10)
+                except asyncio.TimeoutError:
+                    print('Timed out!')
+                    continue
+                    
+                await add_chunk_safe(session_maker, chunk)
+                self.sent_batches += 1
 
-                        try:
-                            chunk = await asyncio.wait_for(self.insert_chunks.get(), 10)
-                            await add_chunk(session, chunk)
-                            self.sent_batches += 1
-                        except asyncio.TimeoutError:
-                            continue
-                        
-                    except Exception as e:
-                        await self.insert_chunks.put(chunk)
-                        session.rollback()
-                        print(f"Ran into an exception {e}, rolled back")
-
-                    iteration += 1
-            
-            await session.commit()
+                iteration += 1
+        
             print('Finished!')
-        
         except asyncio.CancelledError:
-            await session.commit()
-        
+            pass
         except Exception as e:
             print(traceback.format_exc())
 
