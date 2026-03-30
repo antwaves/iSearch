@@ -183,17 +183,16 @@ async def create_page(session: AsyncSession, page_info):
 # ----------------- FOR INDEXER  -----------------
 #TODO: total pages is broken.. fix it
 async def insert_terms(session, term_info, max_params):
+    ''' Gets a set of terms from a batch, inserts them into the db and updates their total_pages column, and returns their id '''
     ids = []
     chunk = []
-    values =  sorted([{"term": item[0], "total_pages": len(item[1])} for item in term_info.items()],
-    key=lambda x: x["term"])
 
+    term_values =  sorted([{"term": term, "total_pages": 0} for term in term_info.keys()], key=lambda x: x["term"])
     in_stmt = insert(Term).on_conflict_do_nothing()
 
-    while values:
-        print("Creating a chunk")
-        length = min(max_params, len(values))
-        chunk, values = values[:length], values[length:]
+    while term_values:
+        length = min(max_params, len(term_values))
+        chunk, term_values = term_values[:length], term_values[length:]
 
         t = time.time()
         await session.execute(in_stmt, chunk)
@@ -201,8 +200,8 @@ async def insert_terms(session, term_info, max_params):
         terms = [v["term"] for v in chunk]
         result = await session.execute(select(Term.term, Term.term_id).where(Term.term.in_(terms)))
 
-        print(f"Took {time.time() - t} seconds")
         ids.extend(result.all())
+
         
     await session.commit()
     return ids
@@ -210,10 +209,8 @@ async def insert_terms(session, term_info, max_params):
 
 async def add_chunk(session, chunk):
     try:
-        t = time.time()
         stmt = insert(term_links).on_conflict_do_nothing(index_elements=[term_links.c.term_id, term_links.c.page_id])
         await session.execute(stmt, chunk, execution_options={"postgresql_executemany": True})
-        print(f"Took {time.time() - t} seconds to add a chunk")
 
     except Exception as e:
         await session.rollback()
@@ -239,6 +236,17 @@ async def get_pages(session, batch_size):
 
     print("Got all pages")
 
+
+async def set_term_counts(session_maker):
+    print("Updating total_pages")
+    async with session_maker() as session:
+        count_stmt = select(func.count()).select_from(term_links).where(term_links.c.term_id == Term.term_id).scalar_subquery()
+        stmt = update(Term).values(total_pages=count_stmt)
+
+        await session.execute(stmt)
+        await session.commit()
+    print("Updated total pages!")
+            
 
 # ----------------- FOR QUERY ENGINE -----------------
 async def retrieve_term_pages(session, term_str):
