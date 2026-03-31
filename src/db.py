@@ -178,7 +178,31 @@ async def create_page(session: AsyncSession, page_info):
 
 
 # ----------------- FOR INDEXER  -----------------
+async def run_transaction_safely(session_maker, transaction_func, args):
+    ''' Runs a given database transaction while catching and retrying on deadlocks and other errors'''
+    async with session_maker() as session:
+        for retry in range(5):
+            try:
+                return await transaction_func(session, *args)
+            except DBAPIError as e:
+                await session.rollback()
+                if isinstance(e.orig, DeadlockDetectedError):
+                    sleep_time = 0.2 * (2 ** retry)
+                    print(f"Deadlock detected in {transaction_func}, retry # {retry + 1}, sleeping {sleep_time}")
+                    await asyncio.sleep(sleep_time)
+                else:
+                    print(f"Exception in {transaction_func}: {e}")
+                    raise
+            except Exception as e:
+                await session.rollback()
+                print(f"Exception in {transaction_func}: {e}")
+                raise
+        
+        await session.close()
+
+
 async def insert_terms(session, in_stmt, chunk, terms):
+    ''' Inserts terms and gets their ids '''
     await session.execute(in_stmt, chunk)
     result = await session.execute(select(Term.term, Term.term_id).where(Term.term.in_(terms)))
     await session.commit()
@@ -198,67 +222,29 @@ async def insert_terms_safe(session_maker, term_info, max_params):
         chunk, term_values = term_values[:length], term_values[length:]
         terms = [v["term"] for v in chunk]
         
-        async with session_maker() as session:
-            for retry in range(5):
-                try:
-                    result_ids = await insert_terms(session, in_stmt, chunk, terms)
-                    break
-
-                except DBAPIError as e:
-                    session.rollback()
-                    if isinstance(e.orig, DeadlockDetectedError):
-                        sleep_time = 0.2 * (2 ** retry)
-                        print(f"Deadlock detected in insert_terms, retry {retry+1}, sleeping {sleep_time}")
-                        await asyncio.sleep(sleep_time)
-                    else:
-                        print(f"Exception in insert_terms {e}")
-                        raise
-
-                except Exception as e:
-                    print(f"Exception in insert_terms {e}")
-                    await session.rollback()
-                    raise
-            
-            await session.close()
-
+        result_ids = await run_transaction_safely(session_maker, transaction_func=insert_terms, args=[in_stmt, chunk, terms])
         if result_ids:
             ids.extend(result_ids)
+        else:
+            print("Failed to get ids")
 
     return ids
 
 
-async def add_chunk(session, chunk, retry = 0):
+async def add_chunk(session, chunk):
+    ''' Add a chunk of term-page links '''
     stmt = insert(term_links).on_conflict_do_nothing(index_elements=[term_links.c.term_id, term_links.c.page_id])
     await session.execute(stmt, chunk, execution_options={"postgresql_executemany": True})
     await session.commit()
 
 
 async def add_chunk_safe(session_maker, chunk):
-    async with session_maker() as session:
-        for retry in range(5):
-            try:
-                await add_chunk(session, chunk)
-                await session.close()
-                return
-
-            except DBAPIError as e:
-                await session.rollback()
-
-                if isinstance(e.orig, DeadlockDetectedError):
-                    sleep_time = 0.2 * (2 ** retry)
-                    print(f"Deadlock detected, retry {retry+1}, sleeping {sleep_time}")
-                    await asyncio.sleep(sleep_time)
-                else:
-                    print(f"Exception in add_chunk {e}")
-                    raise
-
-            except Exception as e:
-                print(f"Exception in add_chunk {e}")
-                await session.rollback()
-                raise
+    ''' Add a chunk of term-page links safely '''
+    await run_transaction_safely(session_maker, transaction_func=add_chunk, args=[chunk])
 
 
 async def get_pages(session, batch_size):    
+    ''' Gets all availible pages in a stream and returns them as an async generator object '''
     stmt = select(Page).where(Page.page_content != None).execution_options(yield_per=batch_size)
     result = await session.stream_scalars(stmt)
     batch = []
@@ -277,6 +263,7 @@ async def get_pages(session, batch_size):
 
 
 async def set_term_counts(session_maker):
+    ''' Sets the total_page column for all terms, ran after program has finished executing '''
     print("Updating total_pages")
     async with session_maker() as session:
         count_stmt = select(func.count()).select_from(term_links).where(term_links.c.term_id == Term.term_id).scalar_subquery()

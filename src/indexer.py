@@ -11,7 +11,7 @@ import random
 from dataclasses import dataclass
 
 from queues import queue
-from db import connect_to_db, get_pages, insert_terms_safe, add_chunk_safe, set_term_counts, retrieve_term_pages
+from db import connect_to_db, get_pages, insert_terms_safe, add_chunk_safe, set_term_counts
 
 MAX_PARAMS = 14000
 
@@ -51,9 +51,6 @@ class index_handler:
 
         self.term_workers = []
         self.term_link_workers = []
-        
-        self.created_batches = 0
-        self.sent_batches = 0
 
 
     async def run_indexer(self):
@@ -71,16 +68,8 @@ class index_handler:
         except asyncio.exceptions.CancelledError:
             pass
 
-        print(self.created_batches, self.sent_batches)
         await set_term_counts(session_maker)
         print("All done!")
-
-
-    async def are_term_workers_alive(self):
-        for task in self.term_workers:
-            if not task.done():
-                return True
-        return False
 
 
     async def page_getter(self, session_maker, batch_size):
@@ -100,7 +89,7 @@ class index_handler:
     async def term_insert_worker(self, session_maker, worker_id):
         ''' Handles reading and processing page batches, then sends that off to the term_link_insert workers.
         Recieves a batch, gets all terms using process_chunk (running said function in a seperate process), writes the 
-        terms to the database, links the terms to the pages that contain them and sends that to the term_link_inser workers '''
+        terms to the database, links the terms to the pages that contain them and sends that to the term_link_insert workers '''
 
         try:
             while self.adding_new_pages or not self.page_chunks.empty():
@@ -126,24 +115,20 @@ class index_handler:
                             chunk_values, term_values = term_values[:length], term_values[length:]
                             chunk_values = sorted(chunk_values, key=lambda x: x["term_id"]) #sort to avoid sharelocks
                             await self.insert_chunks.put(chunk_values)
-                            self.created_batches += 1
 
                         pages_containing_term = term_batch[term]
-
                         row = [{"term_id": term_id, "page_id": page_id} for page_id in pages_containing_term]
                         term_values.extend(row)
 
                     if term_values:
                         term_values = sorted(term_values, key=lambda x : x['term_id']) #sort to avoid sharelocks
                         await self.insert_chunks.put(term_values)
-                        self.created_batches += 1 
 
                 self.indexed += self.batch_size
                 print(f"Finished a batch of {self.batch_size} pages. {self.indexed} total pages done")
-                print(self.created_batches, self.sent_batches)
 
             if self.page_chunks.empty():
-                self.still_inserting = False
+                self.still_inserting = False # tell db workers that they can exit
 
         except asyncio.CancelledError:
             pass
@@ -154,26 +139,29 @@ class index_handler:
 
     async def term_link_insert_worker(self, session_maker):
         ''' Recieves term_id page_id pairs from term_inser worker and writes them to the database. '''
-        iteration = 0
         chunk = None
         try:
             while not self.insert_chunks.empty() or self.still_inserting or await self.are_term_workers_alive(): 
                 try:
                     chunk = await asyncio.wait_for(self.insert_chunks.get(), 10)
-                except asyncio.TimeoutError:
+                except asyncio.TimeoutError: # should only time out when the rest of the pipeline is finished working
                     print('Timed out!')
                     continue
-                    
                 await add_chunk_safe(session_maker, chunk)
-                self.sent_batches += 1
-
-                iteration += 1
         
             print('Finished!')
         except asyncio.CancelledError:
             pass
         except Exception as e:
             print(traceback.format_exc())
+
+    
+    async def are_term_workers_alive(self):
+        ''' Checks if term_workers are still running, used by db workers to avoid exiting early'''
+        for task in self.term_workers:
+            if not task.done():
+                return True
+        return False
 
 
 def filter_term(term, amount_of_pages):
@@ -186,6 +174,7 @@ def filter_term(term, amount_of_pages):
 
 
 def process_chunk(chunk, stopwords):
+    ''' Takes a chunk of pages and their content, and converts it to a dictionary of terms and the pages that contain them. Filters out some terms too.'''
     vowels = "aeiouy"
     punctuation = ".?!,:;—()[]{}\\\'\"/*&~+"
     translator = str.maketrans("", "", punctuation)
@@ -235,6 +224,7 @@ def process_chunk(chunk, stopwords):
 
 
 def batch_dict(full_dict, batch_size):
+    ''' Returns batches of a dictionary as a generator object '''
     size = 0
     batch = {}
 
