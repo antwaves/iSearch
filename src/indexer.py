@@ -176,9 +176,12 @@ def filter_term(term, amount_of_pages):
 def process_chunk(chunk, stopwords):
     ''' Takes a chunk of pages and their content, and converts it to a dictionary of terms and the pages that contain them. Filters out some terms too.'''
     vowels = "aeiouy"
-    punctuation = ".?!,:;—()[]{}\\\'\"/*&~+"
-    translator = str.maketrans("", "", punctuation)
-    term_finder = re.compile(r"[A-Za-z0-9_-]+")
+    punctuation = {'.': ' ', '?': ' ', '!': ' ', ',': ' ', 
+                    ':': ' ', ';': ' ', '—': ' ', '(': ' ', ')': ' ', 
+                    '[': ' ', ']': ' ', '{': ' ', '}': ' ', '\\': ' ', "'": ' ',
+                    '"': ' ', '/': ' ', '*': ' ', '&': ' ', '~': ' ', '+': ' '}
+    translator = str.maketrans(punctuation)
+    term_finder = re.compile(r"[A-Za-z0-9_\-#@]+")
 
     term_data = {}
 

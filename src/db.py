@@ -275,11 +275,29 @@ async def set_term_counts(session_maker):
             
 
 # ----------------- FOR QUERY ENGINE -----------------
+async def count_pages(session):
+    stmt = select(func.count()).select_from(Page).where(Page.page_content != None)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def get_total_pages_for_terms(session, terms):
+    set_terms = set(terms)
+    stmt = select(Term.term, Term.total_pages).where(Term.term.in_(set_terms))
+    result = await session.execute(stmt)
+    
+    return result.all()
+
+
 async def retrieve_term_pages(session, term_str):
     stmt = select(Term).where(Term.term == term_str).options(selectinload(Term.pages))
     result = await session.execute(stmt)
     term = result.scalar_one_or_none()
     
+    items = []
     if term:
         for page in term.pages:
-            print(page.page_url)
+            items.append((page.page_url, page.page_content))
+
+    return items
+
