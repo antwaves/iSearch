@@ -159,6 +159,7 @@ async def add_page(session, page_values):
     ''' Adds a page to the database and returns its page id'''
     stmt = insert(Page).on_conflict_do_update(index_elements=["page_url"], set_={"page_content": insert(Page).excluded.page_content}).returning(Page.page_id)
     entry_id = await session.execute(stmt, page_values)
+    await session.commit()
     return entry_id.scalar_one_or_none()
 
 
