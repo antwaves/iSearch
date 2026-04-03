@@ -15,6 +15,8 @@ from sqlalchemy.orm import (Mapped, backref, declarative_base, mapped_column,
                             relationship, selectinload, sessionmaker, load_only)
 from sqlalchemy.sql import func
 
+import time
+
 Base = declarative_base()
 
 page_links = Table(
@@ -139,13 +141,16 @@ class database_handler:
     async def connect_to_db(self, request_pool_size):
         '''Loads database and tables, returns a session object'''          
         self.session_maker = await connect_to_db(request_pool_size)
-
     
+
     async def worker(self):
         while self.still_running():
             try:
                 page_info = db_info(*await self.database_queue.get())
+                t = time.time()
+
                 await create_page(self.session_maker, page_info)
+                #print(f"Took {time.time() - t } to add to db")
 
             except asyncio.CancelledError:
                 break

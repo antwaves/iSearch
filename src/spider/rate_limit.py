@@ -6,6 +6,8 @@ from email.utils import parsedate_to_datetime
 
 from spider.util import to_top_domain, lock, silent_log
 
+import time
+
 
 class robotsTxt:
     def __init__(self, parser, crawl_delay, request_rate):
@@ -23,22 +25,33 @@ class rate_limiter:
         self.domain_wait_times = {}
         self.domain_robot_rules = {}
 
+        self.cache_hits = 0
+        self.cache_misses = 0
+
+        self.block_rate = 0
+        self.not_blocked_rate = 0
+
 
     async def check_robots(self, domain: str):
+        t = time.time()
+        #check if this has already been grabbed
+        if domain in self.domain_robot_rules.keys():
+            self.cache_hits += 1
+            return self.domain_robot_rules[domain]
+        
+        self.cache_misses += 1
         r_parser = urllib.robotparser.RobotFileParser()
         robots_text = None
 
-        #check if this has already been grabbed
-        if domain in self.domain_robot_rules.keys():
-            return self.domain_robot_rules[domain]
-        
         robots_url = domain + "/robots.txt"
         try:
-            async with self.client.get(robots_url, allow_redirects=True, headers=self.headers) as response:   
+            async with self.client.get(robots_url, allow_redirects=True, headers=self.headers) as response:
                 if not response.ok:
+                    self.block_rate += 1
                     self.domain_robot_rules[domain] = None
                     return
 
+                self.not_blocked_rate += 1
                 robots_text = await response.text()
 
                 if not robots_text:
@@ -59,10 +72,11 @@ class rate_limiter:
 
                 return self.domain_robot_rules[domain]
 
+
         except Exception as e:
             silent_log(e, f"check_robots: {robots_url}")
             self.domain_robot_rules[domain] = None
-
+    
 
     def set_rate_limits(self, response, url, robot_rules):
         domain = to_top_domain(url)
@@ -110,7 +124,7 @@ class rate_limiter:
 def get_rate_limit_from_response(response):
     fallback_time = datetime.now(timezone.utc) + timedelta(milliseconds=15000)
 
-    if response.status != 429 and response.status != 503:
+    if response.status not in (403, 429, 503):
         return None
 
     if not response.headers:

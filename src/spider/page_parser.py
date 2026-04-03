@@ -2,7 +2,7 @@ import asyncio
 import time
 import urllib
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 
 from selectolax.lexbor import LexborHTMLParser
 
@@ -20,7 +20,7 @@ class page_info:
 class parser:
     def __init__(self, link_queue, parse_queue, db_queue, workers : int):
         self.adding_new_links = True
-        self.executor = ThreadPoolExecutor(workers)
+        self.executor = ProcessPoolExecutor(workers)
 
         self.link_queue = link_queue
         self.parse_queue = parse_queue
@@ -48,7 +48,6 @@ class parser:
             
             url = page_info.url.replace('\x00', '')
             url = clean_link(url)
-            text = text.replace('\x00', '')
 
             await self.db_queue.put((page_info.url, text, outlinks))
 
@@ -79,6 +78,9 @@ def parse_page(content, base_url: str, adding_new_links: bool):
 
             link = link.rstrip("/")
 
+            if len(link) >= 750:
+                continue
+
             if link.endswith((".jpg", ".png", ".pdf", ".css", ".js", ".zip", ".exe")):
                 continue
         
@@ -98,6 +100,7 @@ def parse_page(content, base_url: str, adding_new_links: bool):
     tree.strip_tags(['style', 'script', 'head', 'title', 'meta', '[document]'])
     text = tree.text(separator=' ')
     text = " ".join(text.split())
+    text = text.replace('\x00', '')
 
     return (text, outlinks)
 

@@ -30,7 +30,7 @@ class webcrawler:
 
 		load_dotenv()
 		email = os.getenv("CONTACT_EMAIL")
-		self.response_headers = {f'User-Agent': 'iSearchBot/1.0 (https://github.com/antwaves/iSearch; {email}) aiohttp/3.13.3',
+		self.response_headers = {f'User-Agent': f'iSearchBot/1.0 (https://github.com/antwaves/iSearch; {email}) aiohttp/3.13.3',
 								'Accept-Language' : 'en-US,en;q=0.9', 'Accept' : '*/*', "Cache-Control" : "max-age=0"}		
 		self.max_response_size = 5 * 1024 * 1024  
 
@@ -43,7 +43,8 @@ class webcrawler:
 
 	async def worker(self):
 		while self.still_running():
-			await self.get_page()		
+			t = time.time()
+			p = await self.get_page()	
 
 
 	async def get_page(self):
@@ -104,21 +105,28 @@ class webcrawler:
 	
 	async def shuffle_handler(self):
 		t = time.time()
+
 		try:
 			while self.still_running():
 				if self.crawled < 2:
 					await asyncio.sleep(1)
-					await self.link_queue.shuffle()
+					until_next_shuffle = self.crawled + await self.link_queue.shuffle()
+
 				else:
 					seconds_elapsed = time.time() - t
-					sleep_time = (5 + (0.07 * seconds_elapsed))
+					sleep_time = 5
 					await asyncio.sleep(sleep_time)
+					if until_next_shuffle > self.crawled:
+						print(f"Skipped over a shuffle. {until_next_shuffle - self.crawled} until next shuffle")
+						continue
 
 					print(f"{"\n" * 3}Shuffling")
-					await self.link_queue.shuffle()
+					until_next_shuffle = self.crawled + await self.link_queue.shuffle()
 					print(time.time() - t, "seconds elapsed")
-					print(f"Sleep time is {sleep_time}")
-					print(f"{self.crawled} pages crawled{'\n' * 3}")
+					print(f"{self.crawled} pages crawled")
+					r = self.rate_limiter
+					print(f"{(r.cache_hits / (r.cache_hits + r.cache_misses)) * 100}% cache hit rate")
+					print(f"{(r.block_rate / (r.block_rate + r.not_blocked_rate)) * 100}% blocked rate{'\n' * 3}")
 
 		except Exception as e:
 			silent_log(e, "shuffle_handler")
