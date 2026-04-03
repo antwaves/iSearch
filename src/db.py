@@ -94,6 +94,29 @@ async def connect_to_db(request_pool_size):
     return Session
 
 
+async def run_transaction_safely(session_maker, transaction_func, args):
+    ''' Runs a given database transaction while catching and retrying on deadlocks and other errors'''
+    async with session_maker() as session:
+        for retry in range(5):
+            try:
+                return await transaction_func(session, *args)
+            except DBAPIError as e:
+                await session.rollback()
+                if isinstance(e.orig, DeadlockDetectedError):
+                    sleep_time = 0.2 * (2 ** retry)
+                    print(f"Deadlock detected in {transaction_func}, retry # {retry + 1}, sleeping {sleep_time}")
+                    await asyncio.sleep(sleep_time)
+                else:
+                    print(f"Exception in {transaction_func}: {e}")
+                    raise
+            except Exception as e:
+                await session.rollback()
+                print(f"Exception in {transaction_func}: {e}")
+                raise
+        
+        await session.close()
+
+
 # ----------------- FOR CRAWLER -----------------
 class db_info:
     def __init__(self, url, content, outlinks):
@@ -119,88 +142,66 @@ class database_handler:
 
     
     async def worker(self):
-        try:
-            async with self.session_maker() as session:
-                while self.still_running():
-                    try:
-                        page_info = db_info( *await self.database_queue.get())
-                        await create_page(session, page_info)
+        while self.still_running():
+            try:
+                page_info = db_info(*await self.database_queue.get())
+                await create_page(self.session_maker, page_info)
 
-                    except asyncio.CancelledError:
-                        await session.commit()
-                        break
+            except asyncio.CancelledError:
+                break
 
-                    except Exception as e:
-                        print("Exception in db worker", e)
-        except Exception as e:
-            print("DB worker's session threw an exception with error:", e)
+            except Exception as e:
+                print("Exception in db worker", e)     
+        print("Db worker exited")
 
 
-# TODO: add deadlock retry and deal with too many params
-async def create_page(session: AsyncSession, page_info):
+async def add_page(session, page_values):
+    ''' Adds a page to the database and returns its page id'''
+    stmt = insert(Page).on_conflict_do_update(index_elements=["page_url"], set_={"page_content": insert(Page).excluded.page_content}).returning(Page.page_id)
+    entry_id = await session.execute(stmt, page_values)
+    return entry_id.scalar_one_or_none()
+
+
+async def add_outlinks(session, outlinks):
+    ''' Adds a set of given outlinks to the database and returns their page ids'''
+    outlink_values = [{"page_url" : link} for link in outlinks]
+    stmt = insert(Page).on_conflict_do_nothing(index_elements=["page_url"])
+    await session.execute(stmt, outlink_values)
+    await session.commit()
+
+    stmt = select(Page.page_id).where(Page.page_url.in_(outlinks))
+    page_ids = await session.execute(stmt)
+    result = page_ids.all()
+    return result
+
+
+async def add_outlink_connections(session, outlink_values):
+    ''' Adds page-page links to page_links '''
+    stmt = insert(page_links).on_conflict_do_nothing()
+    await session.execute(stmt, outlink_values)
+    await session.commit()
+
+
+async def create_page(session_maker, page_info):
     link = page_info.url
     content = page_info.content
+    insert_values = {"page_url": link, "page_content": content}
     outlinks = sorted(set(page_info.outlinks))
-
     
-    print("attempt ", link)
+    print("Attempt ", link)
     try:
-        stmt = (insert(Page).values(page_url=link, page_content=content)
-            .on_conflict_do_update(index_elements=["page_url"], set_={"page_content": insert(Page).excluded.page_content})
-            .returning(Page.page_id)
-        )
-        main_link_id = await session.execute(stmt)
-        main_link_id = main_link_id.scalar_one()
-
-        await session.commit()
-
+        entry_id  = await run_transaction_safely(session_maker, add_page, [insert_values])
         if outlinks:
-            stmt = (insert(Page).values([{"page_url" : link} for link in outlinks])
-                .on_conflict_do_nothing(index_elements=["page_url"]))
-            await session.execute(stmt)
-            await session.commit()
-
-            stmt = select(Page.page_id).where(Page.page_url.in_(outlinks))
-            page_ids = await session.execute(stmt)
-            page_ids = page_ids.scalars()
-
-            stmt = (insert(page_links).values([{"target_page_id": main_link_id, "source_page_id": out_id} for out_id in page_ids])
-                    .on_conflict_do_nothing())   
-            await session.execute(stmt)
+            page_ids = await run_transaction_safely(session_maker, add_outlinks, [outlinks])
+            insert_values = [{"target_page_id": entry_id, "source_page_id": out_id[0]} for out_id in page_ids]
+            await run_transaction_safely(session_maker, add_outlink_connections, [insert_values])
             
-        await session.commit()
-
     except Exception as e:
         print(f"Error adding {link}: {e}")
-        await session.rollback()
-        silent_log(e, "create_page", [link, outlinks])
         await asyncio.sleep(2)
 
 
 # ----------------- FOR INDEXER  -----------------
-async def run_transaction_safely(session_maker, transaction_func, args):
-    ''' Runs a given database transaction while catching and retrying on deadlocks and other errors'''
-    async with session_maker() as session:
-        for retry in range(5):
-            try:
-                return await transaction_func(session, *args)
-            except DBAPIError as e:
-                await session.rollback()
-                if isinstance(e.orig, DeadlockDetectedError):
-                    sleep_time = 0.2 * (2 ** retry)
-                    print(f"Deadlock detected in {transaction_func}, retry # {retry + 1}, sleeping {sleep_time}")
-                    await asyncio.sleep(sleep_time)
-                else:
-                    print(f"Exception in {transaction_func}: {e}")
-                    raise
-            except Exception as e:
-                await session.rollback()
-                print(f"Exception in {transaction_func}: {e}")
-                raise
-        
-        await session.close()
-
-
 async def insert_terms(session, in_stmt, chunk, terms):
     ''' Inserts terms and gets their ids '''
     await session.execute(in_stmt, chunk)
