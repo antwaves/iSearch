@@ -34,7 +34,7 @@ class queue:
 
 class jqueue:
     def __init__(self):
-        self.queue = janus.Queue()
+        self.queue = janus.Queue() #i have no idea why im using this
     
     async def put(self, item: str) -> None:
         await self.queue.async_q.put(item)
@@ -87,7 +87,7 @@ class unique_queue:
         return len(self.queue._queue)
 
 
-    async def shuffle(self):
+    async def shuffle(self, domain_distance: int) -> None:
         try:
             self.shuffle_queue.extend(self.queue._queue)
             self.queue._queue = deque()
@@ -104,8 +104,8 @@ class unique_queue:
                 domain_pages.setdefault(domain, deque()).append(link)
 
             remaining_domains = sorted(domain_pages.keys(), key=lambda x: len(domain_pages[x]), reverse=True)
-            until_next_shuffle = len(remaining_domains)
 
+            added = 0
             while remaining_domains:
                 temp = []
 
@@ -114,13 +114,18 @@ class unique_queue:
 
                     if queue:
                         await self.queue.put(queue.popleft())
+                        added += 1
                     
                     if queue:
                         temp.append(domain)
+                        added += 1
+
+                    if added >= domain_distance: 
+                        added = 0
+                        break
                 remaining_domains = temp       
             self.shuffle_queue = leftover
 
         except Exception as e:
             print(e)
         
-        return until_next_shuffle

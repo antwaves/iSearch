@@ -110,18 +110,15 @@ class webcrawler:
 			while self.still_running():
 				if self.crawled < 2:
 					await asyncio.sleep(1)
-					until_next_shuffle = self.crawled + await self.link_queue.shuffle()
+					await self.link_queue.shuffle(200)
 
 				else:
 					seconds_elapsed = time.time() - t
-					sleep_time = 5
+					sleep_time = (5 + (0.07 * seconds_elapsed))
 					await asyncio.sleep(sleep_time)
-					if until_next_shuffle > self.crawled:
-						print(f"Skipped over a shuffle. {until_next_shuffle - self.crawled} until next shuffle")
-						continue
-
+		
 					print(f"{"\n" * 3}Shuffling")
-					until_next_shuffle = self.crawled + await self.link_queue.shuffle()
+					await self.link_queue.shuffle(250)
 					print(time.time() - t, "seconds elapsed")
 					print(f"{self.crawled} pages crawled")
 					r = self.rate_limiter

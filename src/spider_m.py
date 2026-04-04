@@ -52,7 +52,7 @@ class spider:
 
 			for url in starting_urls:
 				self.link_queue.put(url)
-			await self.link_queue.shuffle()
+			await self.link_queue.shuffle(100)
 
 			self.parse_handler = parser(self.link_queue, self.parse_queue, self.database_queue, worker_num)
 
