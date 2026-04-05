@@ -26,6 +26,8 @@ class parser:
         self.parse_queue = parse_queue
         self.db_queue = db_queue
 
+        self.batch_size = 15
+
 
     def still_running(self):
         return self.adding_new_links or not self.parse_queue.empty()
@@ -41,11 +43,12 @@ class parser:
             text, outlinks = await self.run_parse_page(page_info)
         
             if not text:
-                return 
-            
-            for link in outlinks:
-                self.link_queue.put(link)
-            
+                return    
+
+            batches = [tuple(outlinks[i : i + self.batch_size]) for i in range(0, len(outlinks), self.batch_size)]  #some bullshit to batch the list
+            for batch in batches:
+                self.link_queue.put(batch)
+
             url = page_info.url.replace('\x00', '')
             url = clean_link(url)
 

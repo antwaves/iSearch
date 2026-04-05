@@ -9,8 +9,9 @@ from dotenv import load_dotenv
 
 from spider.page_parser import page_info
 from spider.rate_limit import (rate_limiter, get_rate_limit_from_response, 
-						get_rate_limit_from_robots, cannot_fetch)
+						get_rate_limit_from_robots, can_fetch)
 from spider.util import to_domain, silent_log
+from spider.async_request import fetch
 
 #and cchardet and pip-system-certs
 
@@ -20,8 +21,8 @@ class webcrawler:
 	''' Class responsible for crawling. Using an async session provided by the spider, visits (and filters through) pages, and gives their content
 		to the page parser. Page parser gives back outlinks which are then visited.'''
 
-	def __init__(self, request_client, link_queue, parse_queue):
-		self.request_client = request_client 
+	def __init__(self, session, link_queue, parse_queue):
+		self.session = session 
 		self.link_queue = link_queue
 		self.parse_queue = parse_queue
 
@@ -34,7 +35,8 @@ class webcrawler:
 								'Accept-Language' : 'en-US,en;q=0.9', 'Accept' : '*/*', "Cache-Control" : "max-age=0"}		
 		self.max_response_size = 5 * 1024 * 1024  
 
-		self.rate_limiter = rate_limiter(request_client, self.response_headers)
+		self.rate_limiter = rate_limiter(session, self.response_headers)
+		self.request_semaphore = asyncio.Semaphore(8)
 
 
 	def still_running(self):
@@ -48,46 +50,77 @@ class webcrawler:
 
 
 	async def get_page(self):
-		url = await self.link_queue.get()
-		domain = to_domain(url)
+		t = time.perf_counter()
 
-		if domain == "https://" or domain == "http://": #invalid domain
+		urls = await self.link_queue.get()
+
+		if not urls:
 			self.link_queue.task_done()
-			return None
+			return 
 
+		url_to_domain = {}
+		for url in urls:
+			domain = to_domain(url)
+			if domain == "https://" or domain == "http://": #invalid domain
+				continue
+			url_to_domain[url] = domain 
+		urls = list(url_to_domain.keys())
+		domains = list(set(url_to_domain.values()))	
+		
 		try:
-			robot_rules = await self.rate_limiter.check_robots(domain)
-			if cannot_fetch(url, robot_rules):
-				return None
+			robot_rules = await self.rate_limiter.check_robots_for_batch(domains)
 
-			lock = self.rate_limiter.get_domain_lock(url)
-			async with lock:
-				sleep_time = self.rate_limiter.get_sleep_time(domain)
-				if sleep_time:
-					await asyncio.sleep(sleep_time)
+			if not robot_rules:
+				self.link_queue.task_done()
+				return
 
+			to_grab = []
+			for url in urls:
+				domain = url_to_domain[url]
+				robot_rule = robot_rules[domain]
+				if can_fetch(url, robot_rule):
+					to_grab.append(url)
+		
+			sleep_times = [self.rate_limiter.get_sleep_time(domain) for domain in domains]
+			sleep_time = max(sleep_times)
+			if sleep_time >= 4:
+				print("Ran into a long sleep time")
+				self.link_queue.put(tuple(to_grab))
+				self.link_queue.task_done()
+				return
+			await asyncio.sleep(sleep_time)
+
+			async with self.request_semaphore:
 				try:
-					async with self.request_client.get(url, allow_redirects=True, headers=self.response_headers) as response:
-						if not self.filter_response(response.headers):
-							return None
-
-						self.rate_limiter.set_rate_limits(response, url, robot_rules)
-						text = await response.text(encoding='utf-8', errors='replace')
-						await self.parse_queue.put(page_info(url, text))
+					responses = [fetch(self.session, url, self.response_headers) for url in to_grab]
+					response_results = await asyncio.gather(*responses)
 					
-					self.crawled += 1
+					for response in response_results:
+						if not response['received'] or not self.is_response_good(response['headers']):
+							continue
+						
+						url = response['url']
+						domain = url_to_domain[url]
+						response_text = response['text']
+
+						self.rate_limiter.set_rate_limits(response, url, robot_rules[domain], domain)
+						await self.parse_queue.put(page_info(url, response_text))
+					
+					self.crawled += len(to_grab)
 				except Exception as e:
+					print(f"Exception in get-page-request {e}")
 					silent_log(e, "get_page-request", [url, domain])
 
 		except Exception as e:
+			print(f"Exception in get_page {e}")
 			silent_log(e, "get_page", [url, domain])
-			return None
+			return 
 
 		finally:
 			self.link_queue.task_done()
 
 
-	def filter_response(self, headers): 
+	def is_response_good(self, headers): 
 		if int(headers.get("Content-Length", 0)) > self.max_response_size:
 			return False
 
@@ -110,7 +143,7 @@ class webcrawler:
 			while self.still_running():
 				if self.crawled < 2:
 					await asyncio.sleep(1)
-					await self.link_queue.shuffle(200)
+					await self.link_queue.shuffle(450)
 
 				else:
 					seconds_elapsed = time.time() - t
@@ -118,7 +151,7 @@ class webcrawler:
 					await asyncio.sleep(sleep_time)
 		
 					print(f"{"\n" * 3}Shuffling")
-					await self.link_queue.shuffle(250)
+					await self.link_queue.shuffle(450)
 					print(time.time() - t, "seconds elapsed")
 					print(f"{self.crawled} pages crawled")
 					r = self.rate_limiter

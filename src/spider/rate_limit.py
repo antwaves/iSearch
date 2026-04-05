@@ -5,23 +5,22 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 from spider.util import to_top_domain, lock, silent_log
+from spider.async_request import fetch
 
 import time
 
 
 class robotsTxt:
-    def __init__(self, parser, crawl_delay, request_rate):
+    def __init__(self, parser, rate_limit):
         self.parser = parser
-        self.crawl_delay = crawl_delay
-        self.request_rate = request_rate
+        self.rate_limit = rate_limit
 
 
 class rate_limiter:
-    def __init__(self, client, headers):
-        self.client = client
+    def __init__(self, session, headers):
+        self.session = session
         self.headers = headers
 
-        self.domain_locks = {}
         self.domain_wait_times = {}
         self.domain_robot_rules = {}
 
@@ -31,55 +30,74 @@ class rate_limiter:
         self.block_rate = 0
         self.not_blocked_rate = 0
 
+    # use reppy?
 
-    async def check_robots(self, domain: str):
-        t = time.time()
-        #check if this has already been grabbed
-        if domain in self.domain_robot_rules.keys():
-            self.cache_hits += 1
-            return self.domain_robot_rules[domain]
+    async def check_robots_for_batch(self, domains: list):
+        to_grab = []
+        robot_rules = {} # domain : robot_rules
+
+        for domain in domains:
+            if domain in self.domain_robot_rules.keys():
+                self.cache_hits += 1
+                robot_rules[domain] = self.domain_robot_rules[domain]
+                continue
+            to_grab.append(domain)
+            self.cache_misses += 1
         
-        self.cache_misses += 1
-        r_parser = urllib.robotparser.RobotFileParser()
-        robots_text = None
-
-        robots_url = domain + "/robots.txt"
         try:
-            async with self.client.get(robots_url, allow_redirects=True, headers=self.headers) as response:
-                if not response.ok:
+            robot_urls = [domain + "/robots.txt" for domain in to_grab]
+            response_grabs = [fetch(self.session, url, self.headers) for url in robot_urls]
+            responses = await asyncio.gather(*response_grabs)
+
+            for response in responses:
+                domain = response['url'][:-len("/robots.txt")] # not hardcoding to make this easier to read
+                
+                if not response:
+                    continue
+
+                if 'ok' not in response.keys() or not response['ok']:
                     self.block_rate += 1
                     self.domain_robot_rules[domain] = None
-                    return
-
+                    robot_rules[domain] = None
+                    continue
                 self.not_blocked_rate += 1
-                robots_text = await response.text()
 
-                if not robots_text:
+                if not 'text' in response.keys():
                     self.domain_robot_rules[domain] = None
-                    return 
+                    robot_rules[domain] = None
+                    continue
 
+                robots_text = response['text']
                 lines = robots_text.splitlines()
+                r_parser = urllib.robotparser.RobotFileParser()
                 r_parser.parse(lines)
-                        
-                #get rate-limits to not get banned by websites
+
                 crawl_delay = r_parser.crawl_delay(self.headers["User-Agent"])
                 request_rate = r_parser.request_rate(self.headers["User-Agent"])
-
                 if request_rate:
                     request_rate = request_rate.seconds / request_rate.requests
 
-                self.domain_robot_rules[domain] = robotsTxt(r_parser, crawl_delay, request_rate)
+                if crawl_delay and request_rate:
+                    rate_limit = max(crawl_delay, request_rate)
+                elif crawl_delay or request_rate:
+                    rate_limit = crawl_delay if crawl_delay else request_rate
+                else:
+                    rate_limit = 0 #changed later
 
-                return self.domain_robot_rules[domain]
-
-
+                robot_rule = robotsTxt(r_parser, rate_limit)
+                self.domain_robot_rules[domain] = robot_rule
+                robot_rules[domain] = robot_rule
+            
+            return robot_rules
+                        
         except Exception as e:
-            silent_log(e, f"check_robots: {robots_url}")
-            self.domain_robot_rules[domain] = None
-    
+            print(f"Robot parsing failed with exeception {e}")
+            silent_log(e, f"check_robots: {robot_urls}")
 
-    def set_rate_limits(self, response, url, robot_rules):
-        domain = to_top_domain(url)
+
+    def set_rate_limits(self, response, url, robot_rules, domain = None):
+        if not domain:
+            domain = to_top_domain(url)
 
         response_limit = get_rate_limit_from_response(response)
         if response_limit:
@@ -95,24 +113,12 @@ class rate_limiter:
         self.domain_wait_times[domain] = datetime.now(timezone.utc) + timedelta(milliseconds=fallback_wait)
 
 
-    def get_domain_lock(self, url):
-        domain = to_top_domain(url)
-
-        if domain not in self.domain_locks.keys():
-            domain_lock = lock()
-            self.domain_locks[domain] = domain_lock
-
-        return self.domain_locks[domain]
-
-
     def get_sleep_time(self, domain):
         if domain not in self.domain_wait_times.keys():
             return 0
 
         now = datetime.now(timezone.utc)
         sleep_time = (self.domain_wait_times[domain] - now)
-        print(self.domain_wait_times[domain])
-        print(sleep_time)
         sleep_seconds = sleep_time.total_seconds()
 
         if sleep_seconds > 0.05:
@@ -124,13 +130,14 @@ class rate_limiter:
 def get_rate_limit_from_response(response):
     fallback_time = datetime.now(timezone.utc) + timedelta(milliseconds=15000)
 
-    if response.status not in (403, 429, 503):
+    if response['status'] not in (403, 429, 503):
         return None
 
-    if not response.headers:
+    headers = response['headers']
+    if not headers:
         return fallback_time
 
-    retry_after = response.headers.get("Retry-After")
+    retry_after = headers.get("Retry-After")
     if not retry_after:
         return fallback_time
 
@@ -144,18 +151,12 @@ def get_rate_limit_from_response(response):
 
 
 def get_rate_limit_from_robots(robot_rules):
-    if not(robot_rules and (robot_rules.crawl_delay or robot_rules.request_rate)):
+    if not(robot_rules):
         return None
-        
-    crawl_delay = robot_rules.crawl_delay if robot_rules.crawl_delay else 0
-    request_rate = robot_rules.request_rate if robot_rules.request_rate else 0
 
-    wait_time = 0
-    if crawl_delay >= request_rate:
-        wait_time = crawl_delay
-    else:
-        wait_time = request_rate
-
+    wait_time = robot_rules.rate_limit
+    if not wait_time:
+        wait_time = 0
     if wait_time < 0.2:
         wait_time = 0.2
 
@@ -163,5 +164,7 @@ def get_rate_limit_from_robots(robot_rules):
     return wait_time
 
     
-def cannot_fetch(url, robot_rules):
-    return robot_rules and (not robot_rules.parser.can_fetch("*", url))
+def can_fetch(url, robot_rules):
+    if robot_rules:
+        return robot_rules.parser.can_fetch("*", url)
+    return True

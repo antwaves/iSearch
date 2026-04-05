@@ -40,11 +40,11 @@ class spider:
 		self.database_workers = [asyncio.create_task(self.database_handler.worker()) for _ in range(database_worker_num)]
 
 
-	async def run(self, worker_num : int, starting_urls: list, request_timeout : int = 8, tcp_limit : int = 60):
+	async def run(self, worker_num : int, starting_urls: list, request_timeout : int = 10, tcp_limit : int = 60):
 		'''Runs the spider. Starts the aiohttp session, instantiates the crawl, parse, and database handlers,
 		 	adds the starter links, creates workers for crawling, parsing and database stuff and starts them up too.
 			Also handles shuffling. Note that the worker list includes the manager. '''
-		timeout = aiohttp.ClientTimeout(total=request_timeout)
+		timeout = aiohttp.ClientTimeout(total=request_timeout, connect=request_timeout // 2, sock_read=request_timeout // 2)
 		conn = aiohttp.TCPConnector(limit_per_host=tcp_limit)
 
 		async with aiohttp.ClientSession(timeout=timeout, connector=conn, max_line_size=8190 * 2, max_field_size=8190 * 2) as request_client:
@@ -89,7 +89,9 @@ async def main():
 	with open("starter_links.txt", "r") as f:
 		lines = f.readlines()
 		lines = [line.strip() for line in lines]
-	start_urls = [line for line in lines if line != "\n"]
+	start_urls = [line for line in lines if line != "\n" and line]
+	start_urls = [tuple(start_urls[i : i + 3]) for i in range(0, len(start_urls), 3)]
+
 	random.shuffle(start_urls)
 	start = time.perf_counter()
 
@@ -107,3 +109,4 @@ if __name__ == '__main__':
 		print(traceback.format_exc())
 	
 	print("Exited.")
+	
