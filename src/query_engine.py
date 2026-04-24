@@ -82,6 +82,8 @@ async def main():
     while query != "(quit)":
         query = input("New input!: ")
 
+        t = time.perf_counter()
+
         q_terms = to_terms(query, translator, term_finder)
 
         async with session_maker() as session:
@@ -89,6 +91,7 @@ async def main():
 
         q_idf = await get_vector_idf(q_terms, term_total_pages, total_pages)
         query_tf_idf = get_tf_idf(q_terms, q_terms, q_idf)
+        print(query_tf_idf)
 
         all_pages = []
         async with session_maker() as session:
@@ -105,15 +108,18 @@ async def main():
             simmilarity = get_cosine_simmilarity(query_tf_idf, tf_idf)
             l_rank = 1 + link_rank(page_url, q_terms)
 
-            score = (simmilarity ** 1.2) * (l_rank)
+            score = (simmilarity ** 1.2) * (l_rank) 
 
-            scores.append([page_url, score, [simmilarity, l_rank]])
+            scores.append([page_url, score, [simmilarity, l_rank, tf_idf]])
 
         scores = sorted(scores, key=lambda x: x[1], reverse=True)
         for score in scores[:20]:
-            print(score[0], score[1], score[2][1])
+            pass
+            #print(score[0], score[1], score[2], score[2][1])
+        
+        print(time.perf_counter() - t)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-
+    

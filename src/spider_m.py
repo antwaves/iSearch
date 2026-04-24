@@ -40,7 +40,7 @@ class spider:
 		self.database_workers = [asyncio.create_task(self.database_handler.worker()) for _ in range(database_worker_num)]
 
 
-	async def run(self, worker_num : int, starting_urls: list, request_timeout : int = 10, tcp_limit : int = 60):
+	async def run(self, worker_num : int, starting_urls: list, request_timeout : int = 20, tcp_limit : int = 60):
 		'''Runs the spider. Starts the aiohttp session, instantiates the crawl, parse, and database handlers,
 		 	adds the starter links, creates workers for crawling, parsing and database stuff and starts them up too.
 			Also handles shuffling. Note that the worker list includes the manager. '''
@@ -97,7 +97,7 @@ async def main():
 
 	#TODO, figure out the optimal split up of workers
 	s = spider()	
-	await s.run(worker_num=35, starting_urls=start_urls)
+	await s.run(worker_num=45, starting_urls=start_urls)
 
 	print(time.perf_counter() - start)
 

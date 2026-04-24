@@ -204,6 +204,9 @@ async def create_page(session_maker, page_info):
             
     except Exception as e:
         print(f"Error adding {link}: {e}")
+
+        with open("log.txt", a) as f:
+            f.write(e)
         await asyncio.sleep(2)
 
 
