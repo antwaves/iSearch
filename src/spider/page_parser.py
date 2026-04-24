@@ -26,7 +26,8 @@ class parser:
         self.parse_queue = parse_queue
         self.db_queue = db_queue
 
-        self.batch_size = 15
+        self.workers = workers
+        self.batch_size = 40
 
 
     def still_running(self):
@@ -55,6 +56,7 @@ class parser:
             await self.db_queue.put((page_info.url, text, outlinks))
 
         except Exception as e:
+            self.executor =  ProcessPoolExecutor(self.workers)
             silent_log(e, "add_page")
 
         finally: 

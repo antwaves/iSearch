@@ -13,6 +13,8 @@ from spider.rate_limit import (rate_limiter, get_rate_limit_from_response,
 from spider.util import to_domain, silent_log
 from spider.async_request import fetch
 
+import traceback
+
 #and cchardet and pip-system-certs
 
 
@@ -59,37 +61,52 @@ class webcrawler:
 			return 
 
 		url_to_domain = {}
+		domain_to_urls = {}
+
 		for url in urls:
 			domain = to_domain(url)
 			if domain == "https://" or domain == "http://": #invalid domain
 				continue
+
+			domain_to_urls.setdefault(domain, []).append(url)
 			url_to_domain[url] = domain 
+
 		urls = list(url_to_domain.keys())
 		domains = list(set(url_to_domain.values()))	
-		
+	
 		try:
-			robot_rules = await self.rate_limiter.check_robots_for_batch(domains)
+			to_grab = [url for url in urls]
+			sleep_times = []
 
+			for domain in domains:
+				sleep_time = self.rate_limiter.get_sleep_time(domain)
+				if sleep_time < 10:
+					sleep_times.append(sleep_time)
+					continue
+				
+				urls = domain_to_urls[domain]
+				print(f"Urls {urls} had a long sleep time of {sleep_time}")
+				for url in urls:
+					to_grab.remove(url)				
+
+			if not to_grab or not sleep_times:
+				print("All objects had a long sleep time or something broke")
+				self.link_queue.task_done()
+
+			sleep_time = max(sleep_times)
+			await asyncio.sleep(sleep_time)
+
+			robot_rules = await self.rate_limiter.check_robots_for_batch(domains)
 			if not robot_rules:
 				self.link_queue.task_done()
 				return
 
-			to_grab = []
 			for url in urls:
 				domain = url_to_domain[url]
 				robot_rule = robot_rules[domain]
-				if can_fetch(url, robot_rule):
-					to_grab.append(url)
-		
-			sleep_times = [self.rate_limiter.get_sleep_time(domain) for domain in domains]
-			sleep_time = max(sleep_times)
-			if sleep_time >= 4:
-				print("Ran into a long sleep time")
-				self.link_queue.put(tuple(to_grab))
-				self.link_queue.task_done()
-				return
-			await asyncio.sleep(sleep_time)
-
+				if not can_fetch(url, robot_rule):
+					to_grab.remove(url)
+	
 			async with self.request_semaphore:
 				try:
 					responses = [fetch(self.session, url, self.response_headers) for url in to_grab]
@@ -107,6 +124,8 @@ class webcrawler:
 						await self.parse_queue.put(page_info(url, response_text))
 					
 					self.crawled += len(to_grab)
+
+					print(f"Finished a batch with length {len(to_grab)}")
 				except Exception as e:
 					print(f"Exception in get-page-request {e}")
 					silent_log(e, "get_page-request", [url, domain])
@@ -137,26 +156,26 @@ class webcrawler:
 
 	
 	async def shuffle_handler(self):
-		t = time.time()
+		start_time = time.perf_counter()
 
-		try:
-			while self.still_running():
-				if self.crawled < 2:
-					await asyncio.sleep(1)
-					await self.link_queue.shuffle(450)
+		while self.still_running():
+			if self.crawled < 2:
+				await asyncio.sleep(1)
+				await self.link_queue.shuffle(450)
 
-				else:
-					seconds_elapsed = time.time() - t
-					sleep_time = (5 + (0.07 * seconds_elapsed))
-					await asyncio.sleep(sleep_time)
-		
-					print(f"{"\n" * 3}Shuffling")
-					await self.link_queue.shuffle(450)
-					print(time.time() - t, "seconds elapsed")
-					print(f"{self.crawled} pages crawled")
-					r = self.rate_limiter
-					print(f"{(r.cache_hits / (r.cache_hits + r.cache_misses)) * 100}% cache hit rate")
-					print(f"{(r.block_rate / (r.block_rate + r.not_blocked_rate)) * 100}% blocked rate{'\n' * 3}")
+			else:
+				seconds_elapsed = time.perf_counter() - start_time
+				sleep_time = (5 + (0.07 * seconds_elapsed))
+				await asyncio.sleep(sleep_time)
+				print(sleep_time)
+	
+				t = time.perf_counter()
+				print(f"{"\n" * 3}Shuffling")
+				await self.link_queue.shuffle(450)
+				print(time.perf_counter() - start_time, "seconds elapsed")
+				print(f"{self.crawled} pages crawled")
+				r = self.rate_limiter
+				print(f"{(r.cache_hits / (r.cache_hits + r.cache_misses)) * 100}% cache hit rate")
+				print(f"{(r.block_rate / (r.block_rate + r.not_blocked_rate)) * 100}% blocked rate{'\n' * 3}")
+				print(f"Took {time.perf_counter() - t}")
 
-		except Exception as e:
-			silent_log(e, "shuffle_handler")
