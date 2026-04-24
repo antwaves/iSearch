@@ -88,57 +88,52 @@ class unique_queue:
 
 
     async def shuffle(self, domain_distance: int) -> None:
-        try:
-            self.shuffle_queue.extend(self.queue._queue)
-            self.queue._queue = deque()
+        self.shuffle_queue.extend(self.queue._queue)
+        self.queue._queue = deque()
 
-            size = min(len(self.shuffle_queue), 15000)
-            temp_queue = deque(itertools.islice(self.shuffle_queue, 0, size))
-            leftover = deque(itertools.islice(self.shuffle_queue, size, len(self.shuffle_queue)))
+        size = min(len(self.shuffle_queue), 15000)
+        temp_queue = deque(itertools.islice(self.shuffle_queue, 0, size))
+        leftover = deque(itertools.islice(self.shuffle_queue, size, len(self.shuffle_queue)))
 
-            domains = set()
-            domain_pages = {}
+        domains = set()
+        domain_pages = {}
 
-            if temp_queue:
-                batch_size = len(temp_queue[0])
-            else:
-                batch_size = 1
-            
-            for link_batch in temp_queue:
-                for link in link_batch:
-                    domain = to_top_domain(link)
-                    domain_pages.setdefault(domain, deque()).append(link)
-
-            remaining_domains = sorted(domain_pages.keys(), key=lambda x: len(domain_pages[x]), reverse=True)
-
-            batch = []
-            added = 0
-            while remaining_domains:
-                temp = []
-
-                for domain in remaining_domains:
-                    queue = domain_pages[domain]
-
-                    if queue:
-                        batch.append(queue.popleft())
-                        if len(batch) >= batch_size:
-                            await self.queue.put(batch)
-                            batch = []
-                        added += 1
-                    
-                    if queue:
-                        temp.append(domain)
-
-                    if added >= domain_distance: 
-                        added = 0
-                        break
-
-                remaining_domains = temp       
-            self.shuffle_queue = leftover
-
-            if batch:
-                await self.queue.put(batch)
-
-        except Exception as e:
-            print(e)
+        if temp_queue:
+            batch_size = len(temp_queue[0])
+        else:
+            batch_size = 1
         
+        for link_batch in temp_queue:
+            for link in link_batch:
+                domain = to_top_domain(link)
+                domain_pages.setdefault(domain, deque()).append(link)
+
+        remaining_domains = sorted(domain_pages.keys(), key=lambda x: len(domain_pages[x]), reverse=True)
+
+        batch = []
+        added = 0
+        while remaining_domains:
+            temp = []
+
+            for domain in remaining_domains:
+                queue = domain_pages[domain]
+
+                if queue:
+                    batch.append(queue.popleft())
+                    if len(batch) >= batch_size:
+                        await self.queue.put(batch)
+                        batch = []
+                    added += 1
+                
+                if queue:
+                    temp.append(domain)
+
+                if added >= domain_distance: 
+                    added = 0
+                    break
+
+            remaining_domains = temp       
+        self.shuffle_queue = leftover
+
+        if batch:
+            await self.queue.put(batch)
