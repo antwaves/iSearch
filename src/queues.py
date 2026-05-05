@@ -87,7 +87,7 @@ class unique_queue:
         return len(self.queue._queue)
 
 
-    async def shuffle(self, domain_distance: int) -> None:
+    async def shuffle(self, domain_distance: int, batch_size: int = 10) -> None:
         self.shuffle_queue.extend(self.queue._queue)
         self.queue._queue = deque()
 
@@ -97,22 +97,24 @@ class unique_queue:
 
         domains = set()
         domain_pages = {}
-
-        if temp_queue:
-            batch_size = len(temp_queue[0])
-        else:
-            batch_size = 1
         
         for link_batch in temp_queue:
             for link in link_batch:
                 domain = to_top_domain(link)
-                domain_pages.setdefault(domain, deque()).append(link)
+                domain_pages.setdefault(domain, []).append(link)
 
-        remaining_domains = sorted(domain_pages.keys(), key=lambda x: len(domain_pages[x]), reverse=True)
+        for key in domain_pages.keys():
+            domain_pages[key] = deque(set(domain_pages[key]))
+        remaining_domains = sorted(set(domain_pages.keys()), key=lambda x: len(domain_pages[x]), reverse=True)
+       
+        if len(remaining_domains) > 2: 
+            exit_amount = 2  
+        else:
+            exit_amount = 0 # edge case, usually at the start of program execution
 
         batch = []
         added = 0
-        while remaining_domains:
+        while len(remaining_domains) > exit_amount:
             temp = []
 
             for domain in remaining_domains:
@@ -134,6 +136,7 @@ class unique_queue:
 
             remaining_domains = temp       
         self.shuffle_queue = leftover
+
 
         if batch:
             await self.queue.put(batch)

@@ -40,18 +40,20 @@ class spider:
 		self.database_workers = [asyncio.create_task(self.database_handler.worker()) for _ in range(database_worker_num)]
 
 
-	async def run(self, worker_num : int, starting_urls: list, request_timeout : int = 20, tcp_limit : int = 60):
+	async def run(self, worker_num : int, starting_urls: list, request_timeout : int = 20, tcp_limit : int = 20):
 		'''Runs the spider. Starts the aiohttp session, instantiates the crawl, parse, and database handlers,
 		 	adds the starter links, creates workers for crawling, parsing and database stuff and starts them up too.
 			Also handles shuffling. Note that the worker list includes the manager. '''
 		timeout = aiohttp.ClientTimeout(total=request_timeout, connect=request_timeout // 2, sock_read=request_timeout // 2)
-		conn = aiohttp.TCPConnector(limit_per_host=tcp_limit)
+		conn = aiohttp.TCPConnector(limit=0, limit_per_host=tcp_limit, ttl_dns_cache=300)
 
 		async with aiohttp.ClientSession(timeout=timeout, connector=conn, max_line_size=8190 * 2, max_field_size=8190 * 2) as request_client:
 			self.crawl_handler = webcrawler(request_client, self.link_queue, self.parse_queue)
 
-			for url in starting_urls:
-				self.link_queue.put(url)
+			for batch in starting_urls:
+				print(batch)
+				self.link_queue.put(batch)
+
 			await self.link_queue.shuffle(100)
 
 			self.parse_handler = parser(self.link_queue, self.parse_queue, self.database_queue, worker_num)

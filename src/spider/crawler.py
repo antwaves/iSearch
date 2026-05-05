@@ -92,6 +92,7 @@ class webcrawler:
 			if not to_grab or not sleep_times:
 				print("All objects had a long sleep time or something broke")
 				self.link_queue.task_done()
+				return 
 
 			sleep_time = max(sleep_times)
 			await asyncio.sleep(sleep_time)
@@ -101,7 +102,7 @@ class webcrawler:
 				self.link_queue.task_done()
 				return
 
-			for url in urls:
+			for url in to_grab:
 				domain = url_to_domain[url]
 				robot_rule = robot_rules[domain]
 				if not can_fetch(url, robot_rule):
@@ -161,7 +162,7 @@ class webcrawler:
 		while self.still_running():
 			if self.crawled < 2:
 				await asyncio.sleep(1)
-				await self.link_queue.shuffle(450)
+				await self.link_queue.shuffle(450, 40)
 
 			else:
 				seconds_elapsed = time.perf_counter() - start_time
@@ -171,7 +172,7 @@ class webcrawler:
 	
 				t = time.perf_counter()
 				print(f"{"\n" * 3}Shuffling")
-				await self.link_queue.shuffle(450)
+				await self.link_queue.shuffle(500)
 				print(time.perf_counter() - start_time, "seconds elapsed")
 				print(f"{self.crawled} pages crawled")
 				r = self.rate_limiter

@@ -114,6 +114,7 @@ async def main():
 
         scores = sorted(scores, key=lambda x: x[1], reverse=True)
         for score in scores[:20]:
+            print(score[0])
             pass
             #print(score[0], score[1], score[2], score[2][1])
         
