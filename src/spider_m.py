@@ -3,14 +3,14 @@ import traceback
 import random
 
 import asyncio
-import aiohttp
+import aiohttp #and aiodns
 
 from spider.crawler import webcrawler
 from spider.page_parser import parser
 from db import database_handler
 from queues import jqueue, unique_queue
 
-
+import sys
 
 class spider:
 	''' Class responsibile for handling crawling, parsing and writing to postgres. '''
@@ -30,6 +30,7 @@ class spider:
 
 		#start with the manager
 		self.worker_manager = asyncio.create_task(self.manager())
+		self.conn = None
 	
 
 	def create_workers(self, crawl_worker_num, parse_worker_num, database_worker_num):
@@ -40,18 +41,18 @@ class spider:
 		self.database_workers = [asyncio.create_task(self.database_handler.worker()) for _ in range(database_worker_num)]
 
 
-	async def run(self, worker_num : int, starting_urls: list, request_timeout : int = 20, tcp_limit : int = 20):
+	async def run(self, worker_num : int, starting_urls: list, request_timeout : int = 30, tcp_limit : int = 10):
 		'''Runs the spider. Starts the aiohttp session, instantiates the crawl, parse, and database handlers,
 		 	adds the starter links, creates workers for crawling, parsing and database stuff and starts them up too.
 			Also handles shuffling. Note that the worker list includes the manager. '''
-		timeout = aiohttp.ClientTimeout(total=request_timeout, connect=request_timeout // 2, sock_read=request_timeout // 2)
+		timeout = aiohttp.ClientTimeout(total=request_timeout)
 		conn = aiohttp.TCPConnector(limit=0, limit_per_host=tcp_limit, ttl_dns_cache=300)
+		self.conn = conn
 
 		async with aiohttp.ClientSession(timeout=timeout, connector=conn, max_line_size=8190 * 2, max_field_size=8190 * 2) as request_client:
 			self.crawl_handler = webcrawler(request_client, self.link_queue, self.parse_queue)
 
 			for batch in starting_urls:
-				print(batch)
 				self.link_queue.put(batch)
 
 			await self.link_queue.shuffle(100)
@@ -61,7 +62,7 @@ class spider:
 			self.database_handler = database_handler(self.database_queue)
 			await self.database_handler.connect_to_db(worker_num)
 
-			self.create_workers(worker_num, worker_num // 2, worker_num // 2)
+			self.create_workers(worker_num, worker_num // 2, worker_num)
 
 			try:
 				await asyncio.gather(*self.crawl_workers, *self.parse_workers, *self.database_workers, self.worker_manager)
@@ -73,6 +74,12 @@ class spider:
 		'''Manages and kills workers. Makes workers stop adding new links once max_crawl is passed. Will kill workers once their queues are empty. '''
 		while self.crawl_handler.still_running(): #i know this is basically busy waiting but idc
 			await asyncio.sleep(0.5)	
+			print(self.database_queue.length())
+			#print(f"C {len(self.conn._conns)}")
+			#print(f"A {len(self.conn._acquired)}")
+			#print(f"W {len(self.conn._waiters)}")
+			#print("")
+
 
 		print("Stopped adding new links")
 		self.parse_handler.adding_new_links = False

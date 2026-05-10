@@ -32,7 +32,7 @@ class rate_limiter:
 
     # use reppy?
 
-    async def check_robots_for_batch(self, domains: list):
+    async def check_robots_for_batch(self, domains: list, request_semaphore: asyncio.Semaphore):
         to_grab = []
         robot_rules = {} # domain : robot_rules
 
@@ -46,7 +46,7 @@ class rate_limiter:
         
         try:
             robot_urls = [domain + "/robots.txt" for domain in to_grab]
-            response_grabs = [fetch(self.session, url, self.headers) for url in robot_urls]
+            response_grabs = [fetch(self.session, url, self.headers, request_semaphore) for url in robot_urls]
             responses = await asyncio.gather(*response_grabs)
 
             for response in responses:
@@ -109,7 +109,7 @@ class rate_limiter:
             self.domain_wait_times[domain] = robots_limit
             return
 
-        fallback_wait = 500
+        fallback_wait = 1000
         self.domain_wait_times[domain] = datetime.now(timezone.utc) + timedelta(milliseconds=fallback_wait)
 
 

@@ -38,7 +38,7 @@ class webcrawler:
 		self.max_response_size = 5 * 1024 * 1024  
 
 		self.rate_limiter = rate_limiter(session, self.response_headers)
-		self.request_semaphore = asyncio.Semaphore(8)
+		self.request_semaphore = asyncio.Semaphore(350) # secondary limiter before the actual request pool limiter
 
 
 	def still_running(self):
@@ -55,7 +55,6 @@ class webcrawler:
 		t = time.perf_counter()
 
 		urls = await self.link_queue.get()
-
 		if not urls:
 			self.link_queue.task_done()
 			return 
@@ -70,7 +69,6 @@ class webcrawler:
 
 			domain_to_urls.setdefault(domain, []).append(url)
 			url_to_domain[url] = domain 
-
 		urls = list(url_to_domain.keys())
 		domains = list(set(url_to_domain.values()))	
 	
@@ -80,14 +78,15 @@ class webcrawler:
 
 			for domain in domains:
 				sleep_time = self.rate_limiter.get_sleep_time(domain)
-				if sleep_time < 10:
+				if sleep_time < 3:
 					sleep_times.append(sleep_time)
 					continue
 				
 				urls = domain_to_urls[domain]
-				print(f"Urls {urls} had a long sleep time of {sleep_time}")
+				print(f"\x1b[31mUrls {urls} had a long sleep time of {sleep_time}\x1b[0m")
 				for url in urls:
-					to_grab.remove(url)				
+					if url in to_grab:
+						to_grab.remove(url)				
 
 			if not to_grab or not sleep_times:
 				print("All objects had a long sleep time or something broke")
@@ -95,41 +94,46 @@ class webcrawler:
 				return 
 
 			sleep_time = max(sleep_times)
+			print(f"Sleeping for {sleep_time}")
 			await asyncio.sleep(sleep_time)
 
-			robot_rules = await self.rate_limiter.check_robots_for_batch(domains)
+			robot_rules = await self.rate_limiter.check_robots_for_batch(domains, self.request_semaphore)
 			if not robot_rules:
 				self.link_queue.task_done()
+				print("Died at robot rules")
 				return
 
-			for url in to_grab:
+			for url in urls:
 				domain = url_to_domain[url]
 				robot_rule = robot_rules[domain]
-				if not can_fetch(url, robot_rule):
+				if not can_fetch(url, robot_rule) and url in to_grab:
 					to_grab.remove(url)
 	
-			async with self.request_semaphore:
-				try:
-					responses = [fetch(self.session, url, self.response_headers) for url in to_grab]
-					response_results = await asyncio.gather(*responses)
-					
-					for response in response_results:
-						if not response['received'] or not self.is_response_good(response['headers']):
-							continue
-						
-						url = response['url']
-						domain = url_to_domain[url]
-						response_text = response['text']
+			try:
+				responses = [asyncio.create_task(fetch(self.session, url, self.response_headers, self.request_semaphore)) for url in to_grab]
 
-						self.rate_limiter.set_rate_limits(response, url, robot_rules[domain], domain)
-						await self.parse_queue.put(page_info(url, response_text))
+				for task in asyncio.as_completed(responses):
+					response = await task
 					
-					self.crawled += len(to_grab)
+					if not response:
+						continue 
 
-					print(f"Finished a batch with length {len(to_grab)}")
-				except Exception as e:
-					print(f"Exception in get-page-request {e}")
-					silent_log(e, "get_page-request", [url, domain])
+					if not response['received'] or not self.is_response_good(response['headers']):
+						continue
+					
+					url = response['url']
+					domain = url_to_domain[url]
+					response_text = response['text']
+
+					self.rate_limiter.set_rate_limits(response, url, robot_rules[domain], domain)
+					await self.parse_queue.put(page_info(url, response_text))
+				
+					self.crawled += 1
+
+				print(f"Finished a batch with length {len(to_grab)}")
+			except Exception as e:
+				print(f"Exception in get-page-request {e}")
+				silent_log(e, "get_page-request", [url, domain])
 
 		except Exception as e:
 			print(f"Exception in get_page {e}")
@@ -172,7 +176,7 @@ class webcrawler:
 	
 				t = time.perf_counter()
 				print(f"{"\n" * 3}Shuffling")
-				await self.link_queue.shuffle(500)
+				await self.link_queue.shuffle(500, 50)
 				print(time.perf_counter() - start_time, "seconds elapsed")
 				print(f"{self.crawled} pages crawled")
 				r = self.rate_limiter

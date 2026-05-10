@@ -150,7 +150,7 @@ class database_handler:
                 t = time.time()
 
                 await create_page(self.session_maker, page_info)
-                #print(f"Took {time.time() - t } to add to db")
+                print(f"Took {time.time() - t } to add to db")
 
             except asyncio.CancelledError:
                 break
