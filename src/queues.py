@@ -56,12 +56,42 @@ class jqueue:
         return self.queue.async_q.empty()
 
 
+class sized_set:
+    def __init__(self, max_size):
+        self.max_size = max_size
+        self.set = set()
+        self.queue = deque()
+    
+    
+    def add(self, item):
+        if item in self.set: return
+        self.set.add(item)
+        self.queue.append(item)
+
+        if len(self.queue) > self.max_size:
+            item = self.queue.popleft()
+            self.set.remove(item)
+
+
+    def remove(self, item):
+        self.queue.remove(item)
+        self.set.remove(item)
+    
+
+    def __repr__(self):
+        return self.set.__repr__()
+
+    
+    def __contains__(self, item):
+        return item in self.set
+
+
 #TODO move into webcrawler
 class unique_queue:
     def __init__(self):
         self.queue = asyncio.Queue(maxsize=10000)
         self.shuffle_queue = deque(maxlen=10000)
-        self.seen_pages = set()
+        self.seen_pages = sized_set(5000)
     
 
     def put(self, item: str) -> None:
@@ -114,7 +144,6 @@ class unique_queue:
 
         added = 0
         batch = []
-        stack = deque() # contains batches from most -> least diverse, but queues are first in first out, so flip at end
         while len(remaining_domains) > exit_amount:
             temp = []
 
@@ -124,7 +153,7 @@ class unique_queue:
                 if queue:
                     batch.append(queue.pop())
                     if len(batch) >= batch_size:
-                        stack.append(batch)
+                        await self.queue.put(batch)
                         batch = []
                     added += 1
                 
@@ -138,7 +167,4 @@ class unique_queue:
             remaining_domains = temp     
         self.shuffle_queue = leftover
         if batch:
-            stack.append(batch)
-
-        while stack:
-            await self.queue.put(stack.pop())
+            await self.queue.put(batch)
