@@ -22,8 +22,8 @@ Base = declarative_base()
 page_links = Table(
     "page_outlinks",
     Base.metadata,
-    Column("target_page_id", INTEGER, ForeignKey('pages.page_id'), primary_key=True),
     Column("source_page_id", INTEGER, ForeignKey('pages.page_id'), primary_key=True),
+    Column("outgoing_page_id", INTEGER, ForeignKey('pages.page_id'), primary_key=True),
     schema = 'public'
 )
 
@@ -47,8 +47,8 @@ class Page(Base):
     outlinks = relationship(
         "Page",
         secondary=page_links,
-        primaryjoin=page_id == page_links.c.source_page_id,
-        secondaryjoin=page_id == page_links.c.target_page_id,
+        primaryjoin=page_id == page_links.c.outgoing_page_id,
+        secondaryjoin=page_id == page_links.c.source_page_id,
         back_populates="inlinks",
         lazy='selectin'
         )
@@ -56,8 +56,8 @@ class Page(Base):
     inlinks = relationship(
         "Page",
         secondary=page_links,
-        primaryjoin=page_id == page_links.c.target_page_id,
-        secondaryjoin=page_id == page_links.c.source_page_id,
+        primaryjoin=page_id == page_links.c.source_page_id,
+        secondaryjoin=page_id == page_links.c.outgoing_page_id,
         back_populates="outlinks",
         lazy='selectin'
     )
@@ -133,6 +133,13 @@ class database_handler:
         self.database_queue = database_queue
         self.being_added_to = True
 
+        self.current_batch = []
+        self.batch_mutate_lock = asyncio.Lock()
+        self.max_params = 14000
+        self.batch_size = 500
+
+        self.added = 0
+
 
     def still_running(self):
         return self.being_added_to or not self.database_queue.empty()
@@ -147,10 +154,21 @@ class database_handler:
         while self.still_running():
             try:
                 page_info = db_info(*await self.database_queue.get())
-                t = time.time()
 
-                await create_page(self.session_maker, page_info)
-                print(f"Took {time.time() - t } to add to db")
+                batch_to_add = None
+                async with self.batch_mutate_lock:
+                    self.current_batch.append(page_info)
+                
+                    if len(self.current_batch) >= self.batch_size:
+                        batch_to_add = self.current_batch
+                        self.current_batch = []
+                
+                if batch_to_add:
+                    t = time.perf_counter()
+                    size = len(batch_to_add)
+                    await add_batch(self.session_maker, batch_to_add, self.max_params)
+                    self.added += size
+                    print(f"Took {time.perf_counter() - t} to add {size} pages to db. {self.added} total added.")
 
             except asyncio.CancelledError:
                 break
@@ -160,55 +178,64 @@ class database_handler:
         print("Db worker exited")
 
 
-async def add_page(session, page_values):
-    ''' Adds a page to the database and returns its page id'''
-    stmt = insert(Page).on_conflict_do_update(index_elements=["page_url"], set_={"page_content": insert(Page).excluded.page_content}).returning(Page.page_id)
-    entry_id = await session.execute(stmt, page_values)
-    await session.commit()
-    return entry_id.scalar_one_or_none()
+async def add_batch(session_maker, page_batch, max_params): 
+    # initial inserts work under assumption that the batch is under max params
+    url_to_id = {}
+    urls = list(set([item.url for item in page_batch]))
+    chunk = sorted([{"page_url": item.url, "page_content": item.content} for item in page_batch], key=lambda x: x['page_url'])
 
+    in_stmt = insert(Page).on_conflict_do_update(index_elements=["page_url"], set_={"page_content": insert(Page).excluded.page_content})
+    inserted_pages = await run_transaction_safely(session_maker, transaction_func=insert_pages, args=[in_stmt, chunk, urls])
+    for item in inserted_pages:
+        url_to_id[item[1]] = item[0] 
 
-async def add_outlinks(session, outlinks):
-    ''' Adds a set of given outlinks to the database and returns their page ids'''
-    outlink_values = [{"page_url" : link} for link in outlinks]
-    stmt = insert(Page).on_conflict_do_nothing(index_elements=["page_url"])
-    await session.execute(stmt, outlink_values)
-    await session.commit()
+    # add outlinks
+    outlink_to_id = {}
+    outlinks = []
+    for item in page_batch:
+        outlinks.extend(item.outlinks)
+    outlinks = list(set(outlinks))
 
-    stmt = select(Page.page_id).where(Page.page_url.in_(outlinks))
-    page_ids = await session.execute(stmt)
-    result = page_ids.all()
-    return result
+    outlink_inserts = sorted([{"page_url": url} for url in outlinks], key=lambda x: x['page_url'])
+    outlink_insert_statement = insert(Page).on_conflict_do_nothing()
 
+    outlink_ids = []
+    while outlink_inserts:
+        length = min(max_params, len(outlink_inserts))
+        chunk, outlink_inserts = outlink_inserts[:length], outlink_inserts[length:]
+        result_ids = await run_transaction_safely(session_maker, transaction_func=insert_pages, args=[outlink_insert_statement, chunk, outlinks])
+        if result_ids:
+            outlink_ids.extend(result_ids)
 
-async def add_outlink_connections(session, outlink_values):
-    ''' Adds page-page links to page_links '''
-    stmt = insert(page_links).on_conflict_do_nothing()
-    await session.execute(stmt, outlink_values)
-    await session.commit()
+    for item in outlink_ids:
+        outlink_to_id[item[1]] = item[0]
 
-
-async def create_page(session_maker, page_info):
-    link = page_info.url
-    content = page_info.content
-    insert_values = {"page_url": link, "page_content": content}
-    outlinks = sorted(set(page_info.outlinks))
+    # add page <-> outlink links
+    outlink_connection_inserts = []
+    for item in page_batch:
+        page_id = url_to_id[item.url]
+        item_outlinks = item.outlinks
+        inserts = [{"source_page_id": page_id, "outgoing_page_id" : outlink_to_id[outlink]} for outlink in item_outlinks]
+        outlink_connection_inserts.extend(inserts)
     
-    print("Attempt ", link)
-    try:
-        entry_id  = await run_transaction_safely(session_maker, add_page, [insert_values])
-        if outlinks:
-            page_ids = await run_transaction_safely(session_maker, add_outlinks, [outlinks])
-            insert_values = [{"target_page_id": entry_id, "source_page_id": out_id[0]} for out_id in page_ids]
-            await run_transaction_safely(session_maker, add_outlink_connections, [insert_values])
-            
-    except Exception as e:
-        print(f"Error adding {link}: {e}")
+    outlink_connection_inserts = sorted(outlink_connection_inserts, key = lambda x: x["source_page_id"])
+    in_stmt = insert(page_links).on_conflict_do_nothing()
+    while outlink_connection_inserts:
+        length = min(max_params, len(outlink_connection_inserts))
+        chunk, outlink_connection_inserts = outlink_connection_inserts[:length], outlink_connection_inserts[length:]
+        await run_transaction_safely(session_maker, transaction_func=insert_links, args=[in_stmt, chunk])
 
-        with open("log.txt", a) as f:
-            f.write(e)
-        await asyncio.sleep(2)
 
+async def insert_pages(session, stmt, chunk, urls):
+    await session.execute(stmt, chunk)
+    result = await session.execute(select(Page.page_id, Page.page_url).where(Page.page_url.in_(urls)))
+    await session.commit()
+    return result.all()
+
+
+async def insert_links(session, stmt, chunk):
+    await session.execute(stmt, chunk, execution_options={"postgresql_executemany": True})
+    await session.commit()
 
 # ----------------- FOR INDEXER  -----------------
 async def insert_terms(session, in_stmt, chunk, terms):
