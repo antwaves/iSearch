@@ -10,7 +10,7 @@ from spider.page_parser import parser
 from db import database_handler
 from queues import jqueue, unique_queue
 
-import sys
+from pympler import asizeof
 
 class spider:
 	''' Class responsibile for handling crawling, parsing and writing to postgres. '''
@@ -74,12 +74,6 @@ class spider:
 		'''Manages and kills workers. Makes workers stop adding new links once max_crawl is passed. Will kill workers once their queues are empty. '''
 		while self.crawl_handler.still_running(): #i know this is basically busy waiting but idc
 			await asyncio.sleep(0.5)	
-			print(self.database_queue.length())
-			#print(f"C {len(self.conn._conns)}")
-			#print(f"A {len(self.conn._acquired)}")
-			#print(f"W {len(self.conn._waiters)}")
-			#print("")
-
 
 		print("Stopped adding new links")
 		self.parse_handler.adding_new_links = False
@@ -106,7 +100,7 @@ async def main():
 
 	#TODO, figure out the optimal split up of workers
 	s = spider()	
-	await s.run(worker_num=45, starting_urls=start_urls)
+	await s.run(worker_num=35, starting_urls=start_urls)
 
 	print(time.perf_counter() - start)
 

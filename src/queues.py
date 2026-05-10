@@ -34,7 +34,7 @@ class queue:
 
 class jqueue:
     def __init__(self):
-        self.queue = janus.Queue() #i have no idea why im using this
+        self.queue = janus.Queue(maxsize=500) #i have no idea why im using this
     
     async def put(self, item: str) -> None:
         await self.queue.async_q.put(item)
@@ -89,8 +89,8 @@ class sized_set:
 #TODO move into webcrawler
 class unique_queue:
     def __init__(self):
-        self.queue = asyncio.Queue(maxsize=10000)
-        self.shuffle_queue = deque(maxlen=10000)
+        self.queue = asyncio.Queue(maxsize=5000)
+        self.shuffle_queue = deque(maxlen=5000)
         self.seen_pages = sized_set(5000)
     
 

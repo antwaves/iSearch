@@ -35,7 +35,7 @@ class webcrawler:
 		email = os.getenv("CONTACT_EMAIL")
 		self.response_headers = {f'User-Agent': f'iSearchBot/1.0 (https://github.com/antwaves/iSearch; {email}) aiohttp/3.13.3',
 								'Accept-Language' : 'en-US,en;q=0.9', 'Accept' : '*/*', "Cache-Control" : "max-age=0"}		
-		self.max_response_size = 5 * 1024 * 1024  
+		self.max_response_size = 3 * 1024 * 1024  
 
 		self.rate_limiter = rate_limiter(session, self.response_headers)
 		self.request_semaphore = asyncio.Semaphore(350) # secondary limiter before the actual request pool limiter
@@ -76,17 +76,17 @@ class webcrawler:
 			to_grab = [url for url in urls]
 			sleep_times = []
 
+			domain_sleep_times = {}
 			for domain in domains:
 				sleep_time = self.rate_limiter.get_sleep_time(domain)
-				if sleep_time < 3:
+				if sleep_time * len(domain_to_urls[domain]) < 3: # not perfect, but works. ideally, shouldnt matter
 					sleep_times.append(sleep_time)
 					continue
 				
 				urls = domain_to_urls[domain]
-				print(f"\x1b[31mUrls {urls} had a long sleep time of {sleep_time}\x1b[0m")
 				for url in urls:
 					if url in to_grab:
-						to_grab.remove(url)				
+						to_grab.remove(url)			
 
 			if not to_grab or not sleep_times:
 				print("All objects had a long sleep time or something broke")
@@ -129,6 +129,7 @@ class webcrawler:
 					await self.parse_queue.put(page_info(url, response_text))
 				
 					self.crawled += 1
+					print(url)
 
 				print(f"Finished a batch with length {len(to_grab)}")
 			except Exception as e:

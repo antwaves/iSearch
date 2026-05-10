@@ -110,10 +110,12 @@ async def run_transaction_safely(session_maker, transaction_func, args):
                     await asyncio.sleep(sleep_time)
                 else:
                     print(f"Exception in {transaction_func}: {e}")
+                    print("IM HERE")
                     raise
             except Exception as e:
                 await session.rollback()
                 print(f"Exception in {transaction_func}: {e}")
+                print("no im here")
                 raise
         
         await session.close()
@@ -135,8 +137,8 @@ class database_handler:
 
         self.current_batch = []
         self.batch_mutate_lock = asyncio.Lock()
-        self.max_params = 14000
-        self.batch_size = 500
+        self.max_params = 10000
+        self.batch_size = 200
 
         self.added = 0
 
@@ -168,7 +170,7 @@ class database_handler:
                     size = len(batch_to_add)
                     await add_batch(self.session_maker, batch_to_add, self.max_params)
                     self.added += size
-                    print(f"Took {time.perf_counter() - t} to add {size} pages to db. {self.added} total added.")
+                    print(f"\x1b[102mTook {time.perf_counter() - t} to add {size} pages to db. {self.added} total added. \x1b[0m")
 
             except asyncio.CancelledError:
                 break
@@ -203,7 +205,9 @@ async def add_batch(session_maker, page_batch, max_params):
     while outlink_inserts:
         length = min(max_params, len(outlink_inserts))
         chunk, outlink_inserts = outlink_inserts[:length], outlink_inserts[length:]
-        result_ids = await run_transaction_safely(session_maker, transaction_func=insert_pages, args=[outlink_insert_statement, chunk, outlinks])
+        chunk_outlinks = [item['page_url'] for item in chunk]
+
+        result_ids = await run_transaction_safely(session_maker, transaction_func=insert_pages, args=[outlink_insert_statement, chunk, chunk_outlinks])
         if result_ids:
             outlink_ids.extend(result_ids)
 
