@@ -62,7 +62,7 @@ class spider:
 			self.database_handler = database_handler(self.database_queue)
 			await self.database_handler.connect_to_db(worker_num)
 
-			self.create_workers(worker_num, worker_num // 2, worker_num)
+			self.create_workers(worker_num, worker_num // 2, 3)
 
 			try:
 				await asyncio.gather(*self.crawl_workers, *self.parse_workers, *self.database_workers, self.worker_manager)
@@ -83,6 +83,7 @@ class spider:
 		self.database_handler.being_added_to = False
 		while self.database_handler.still_running():
 			await asyncio.sleep(0.5)
+
 		print("All done")
 
 

@@ -110,6 +110,7 @@ class webcrawler:
 					to_grab.remove(url)
 	
 			try:
+				completed_responses = 0
 				responses = [asyncio.create_task(fetch(self.session, url, self.response_headers, self.request_semaphore)) for url in to_grab]
 
 				for task in asyncio.as_completed(responses):
@@ -129,9 +130,10 @@ class webcrawler:
 					await self.parse_queue.put(page_info(url, response_text))
 				
 					self.crawled += 1
-					print(url)
+					completed_responses += 1
+					#print(url)
 
-				print(f"Finished a batch with length {len(to_grab)}")
+				print(f"Finished a batch with length {completed_responses}")
 			except Exception as e:
 				print(f"Exception in get-page-request {e}")
 				silent_log(e, "get_page-request", [url, domain])

@@ -110,14 +110,12 @@ async def run_transaction_safely(session_maker, transaction_func, args):
                     await asyncio.sleep(sleep_time)
                 else:
                     print(f"Exception in {transaction_func}: {e}")
-                    print("IM HERE")
                     raise
             except Exception as e:
                 await session.rollback()
                 print(f"Exception in {transaction_func}: {e}")
-                print("no im here")
                 raise
-        
+            
         await session.close()
 
 
@@ -138,13 +136,15 @@ class database_handler:
         self.current_batch = []
         self.batch_mutate_lock = asyncio.Lock()
         self.max_params = 10000
-        self.batch_size = 200
+        self.batch_size = 500
 
         self.added = 0
+        self.maybe_added_links = set()
+        self.added_links = set()
 
 
     def still_running(self):
-        return self.being_added_to or not self.database_queue.empty()
+        return self.being_added_to or not self.database_queue.empty() 
 
 
     async def connect_to_db(self, request_pool_size):
@@ -155,7 +155,8 @@ class database_handler:
     async def worker(self):
         while self.still_running():
             try:
-                page_info = db_info(*await self.database_queue.get())
+                async with asyncio.timeout(10):
+                    page_info = db_info(*await self.database_queue.get())
 
                 batch_to_add = None
                 async with self.batch_mutate_lock:
@@ -167,16 +168,29 @@ class database_handler:
                 
                 if batch_to_add:
                     t = time.perf_counter()
-                    size = len(batch_to_add)
-                    await add_batch(self.session_maker, batch_to_add, self.max_params)
-                    self.added += size
-                    print(f"\x1b[102mTook {time.perf_counter() - t} to add {size} pages to db. {self.added} total added. \x1b[0m")
+                    inserts = await add_batch(self.session_maker, batch_to_add, self.max_params)
+                    self.added += inserts
+                    print(f"\x1b[102mTook {time.perf_counter() - t} to add {inserts} pages to db. {self.added} total added. \x1b[0m")
+
+            except asyncio.TimeoutError:
+                print("Timed out! But it's handled.")
+                break
 
             except asyncio.CancelledError:
                 break
 
             except Exception as e:
-                print("Exception in db worker", e)     
+                print("Exception in db worker", e)                   
+            
+
+        async with self.batch_mutate_lock:
+            remaining = self.current_batch
+            self.current_batch = []
+
+        if remaining:
+            await add_batch(self.session_maker, remaining, self.max_params)  
+            print(f"\x1b[102m Added a final batch to db. \x1b[0m")
+        
         print("Db worker exited")
 
 
@@ -184,10 +198,13 @@ async def add_batch(session_maker, page_batch, max_params):
     # initial inserts work under assumption that the batch is under max params
     url_to_id = {}
     urls = list(set([item.url for item in page_batch]))
+    print(len(urls))
     chunk = sorted([{"page_url": item.url, "page_content": item.content} for item in page_batch], key=lambda x: x['page_url'])
 
     in_stmt = insert(Page).on_conflict_do_update(index_elements=["page_url"], set_={"page_content": insert(Page).excluded.page_content})
     inserted_pages = await run_transaction_safely(session_maker, transaction_func=insert_pages, args=[in_stmt, chunk, urls])
+    total_sucessful_inserts = len(inserted_pages)
+
     for item in inserted_pages:
         url_to_id[item[1]] = item[0] 
 
@@ -200,6 +217,7 @@ async def add_batch(session_maker, page_batch, max_params):
 
     outlink_inserts = sorted([{"page_url": url} for url in outlinks], key=lambda x: x['page_url'])
     outlink_insert_statement = insert(Page).on_conflict_do_nothing()
+    
 
     outlink_ids = []
     while outlink_inserts:
@@ -219,6 +237,11 @@ async def add_batch(session_maker, page_batch, max_params):
     for item in page_batch:
         page_id = url_to_id[item.url]
         item_outlinks = item.outlinks
+
+        missing = [url for url in item_outlinks if url not in outlink_to_id]
+        if missing:
+            print(f"\nMissing outlink ids: {len(missing)}\n")
+
         inserts = [{"source_page_id": page_id, "outgoing_page_id" : outlink_to_id[outlink]} for outlink in item_outlinks]
         outlink_connection_inserts.extend(inserts)
     
@@ -228,12 +251,14 @@ async def add_batch(session_maker, page_batch, max_params):
         length = min(max_params, len(outlink_connection_inserts))
         chunk, outlink_connection_inserts = outlink_connection_inserts[:length], outlink_connection_inserts[length:]
         await run_transaction_safely(session_maker, transaction_func=insert_links, args=[in_stmt, chunk])
+    
+    return total_sucessful_inserts
 
 
 async def insert_pages(session, stmt, chunk, urls):
     await session.execute(stmt, chunk)
-    result = await session.execute(select(Page.page_id, Page.page_url).where(Page.page_url.in_(urls)))
     await session.commit()
+    result = await session.execute(select(Page.page_id, Page.page_url).where(Page.page_url.in_(urls)))
     return result.all()
 
 
