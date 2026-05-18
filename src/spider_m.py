@@ -59,10 +59,10 @@ class spider:
 
 			self.parse_handler = parser(self.link_queue, self.parse_queue, self.database_queue, worker_num)
 
+			database_workers = 4
 			self.database_handler = database_handler(self.database_queue)
 			await self.database_handler.connect_to_db(worker_num)
-
-			self.create_workers(worker_num, worker_num // 2, 3)
+			self.create_workers(worker_num, worker_num // 2, database_workers)
 
 			try:
 				await asyncio.gather(*self.crawl_workers, *self.parse_workers, *self.database_workers, self.worker_manager)
@@ -73,7 +73,7 @@ class spider:
 	async def manager(self):
 		'''Manages and kills workers. Makes workers stop adding new links once max_crawl is passed. Will kill workers once their queues are empty. '''
 		while self.crawl_handler.still_running(): #i know this is basically busy waiting but idc
-			await asyncio.sleep(0.5)	
+			await asyncio.sleep(2)	
 
 		print("Stopped adding new links")
 		self.parse_handler.adding_new_links = False
@@ -81,6 +81,7 @@ class spider:
 			await asyncio.sleep(0.5)
 
 		self.database_handler.being_added_to = False
+		print("STOPPED BEING ADDED TO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
 		while self.database_handler.still_running():
 			await asyncio.sleep(0.5)
 

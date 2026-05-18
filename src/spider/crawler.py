@@ -29,7 +29,7 @@ class webcrawler:
 		self.parse_queue = parse_queue
 
 		self.crawled = 0
-		self.max_crawl = 100000
+		self.max_crawl = 5000
 
 		load_dotenv()
 		email = os.getenv("CONTACT_EMAIL")
@@ -39,6 +39,8 @@ class webcrawler:
 
 		self.rate_limiter = rate_limiter(session, self.response_headers)
 		self.request_semaphore = asyncio.Semaphore(350) # secondary limiter before the actual request pool limiter
+
+		self.dupes = 0
 
 
 	def still_running(self):
@@ -58,6 +60,19 @@ class webcrawler:
 		if not urls:
 			self.link_queue.task_done()
 			return 
+
+		dupes = 0
+		to_remove = set()
+		for url in urls:
+			if url not in self.link_queue.seen_pages:
+				self.link_queue.seen_pages.add(url)
+			else:
+				to_remove.add(url)
+				self.dupes += 1
+		self.dupes += dupes
+
+		for url in to_remove:
+			urls.remove(url)
 
 		url_to_domain = {}
 		domain_to_urls = {}
@@ -94,7 +109,7 @@ class webcrawler:
 				return 
 
 			sleep_time = max(sleep_times)
-			print(f"Sleeping for {sleep_time}")
+			#print(f"Sleeping for {sleep_time}")
 			await asyncio.sleep(sleep_time)
 
 			robot_rules = await self.rate_limiter.check_robots_for_batch(domains, self.request_semaphore)
@@ -133,7 +148,9 @@ class webcrawler:
 					completed_responses += 1
 					#print(url)
 
-				print(f"Finished a batch with length {completed_responses}")
+				if self.still_running():
+					print(f"Finished a batch with length {completed_responses}")
+					
 			except Exception as e:
 				print(f"Exception in get-page-request {e}")
 				silent_log(e, "get_page-request", [url, domain])
@@ -172,6 +189,7 @@ class webcrawler:
 				await self.link_queue.shuffle(450, 40)
 
 			else:
+				print(self.dupes)
 				seconds_elapsed = time.perf_counter() - start_time
 				sleep_time = (5 + (0.07 * seconds_elapsed))
 				await asyncio.sleep(sleep_time)

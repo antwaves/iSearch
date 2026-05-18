@@ -17,7 +17,6 @@ async def fetch(session: aiohttp.ClientSession, url: str, headers: dict, semapho
                 }
 
         except asyncio.TimeoutError as e:
-            print(f"\x1b[41mRequest to {url} timed out. {e}. Took {perf_counter() - t} seconds.\x1b[0m")
             return {"url" : url, "received" : False}
         
         except Exception as e:

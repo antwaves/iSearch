@@ -47,8 +47,8 @@ class Page(Base):
     outlinks = relationship(
         "Page",
         secondary=page_links,
-        primaryjoin=page_id == page_links.c.outgoing_page_id,
-        secondaryjoin=page_id == page_links.c.source_page_id,
+        primaryjoin=page_id == page_links.c.source_page_id,
+        secondaryjoin=page_id == page_links.c.outgoing_page_id,
         back_populates="inlinks",
         lazy='selectin'
         )
@@ -56,8 +56,8 @@ class Page(Base):
     inlinks = relationship(
         "Page",
         secondary=page_links,
-        primaryjoin=page_id == page_links.c.source_page_id,
-        secondaryjoin=page_id == page_links.c.outgoing_page_id,
+        primaryjoin=page_id == page_links.c.outgoing_page_id,
+        secondaryjoin=page_id == page_links.c.source_page_id,
         back_populates="outlinks",
         lazy='selectin'
     )
@@ -139,8 +139,6 @@ class database_handler:
         self.batch_size = 500
 
         self.added = 0
-        self.maybe_added_links = set()
-        self.added_links = set()
 
 
     def still_running(self):
@@ -155,8 +153,9 @@ class database_handler:
     async def worker(self):
         while self.still_running():
             try:
-                async with asyncio.timeout(10):
+                async with asyncio.timeout(25):
                     page_info = db_info(*await self.database_queue.get())
+
 
                 batch_to_add = None
                 async with self.batch_mutate_lock:
@@ -168,6 +167,9 @@ class database_handler:
                 
                 if batch_to_add:
                     t = time.perf_counter()
+                    with open("test.txt", "a") as f:
+                        for item in batch_to_add:
+                            f.write(item.url + "\n")
                     inserts = await add_batch(self.session_maker, batch_to_add, self.max_params)
                     self.added += inserts
                     print(f"\x1b[102mTook {time.perf_counter() - t} to add {inserts} pages to db. {self.added} total added. \x1b[0m")
@@ -177,6 +179,7 @@ class database_handler:
                 break
 
             except asyncio.CancelledError:
+                print("I was cancelled!")
                 break
 
             except Exception as e:
@@ -188,17 +191,26 @@ class database_handler:
             self.current_batch = []
 
         if remaining:
-            await add_batch(self.session_maker, remaining, self.max_params)  
-            print(f"\x1b[102m Added a final batch to db. \x1b[0m")
+            l = await add_batch(self.session_maker, remaining, self.max_params)  
+            self.added += l
+            print(f"\x1b[102m Added a final batch to db of size {l} \x1b[0m")
         
+
+        print(self.current_batch)
         print("Db worker exited")
 
 
-async def add_batch(session_maker, page_batch, max_params): 
+async def add_batch(session_maker, page_batch, max_params):  
     # initial inserts work under assumption that the batch is under max params
+    t = time.perf_counter()
+
     url_to_id = {}
-    urls = list(set([item.url for item in page_batch]))
-    print(len(urls))
+    deduped = {}
+    for item in page_batch:
+        deduped[item.url] = item
+    page_batch = list(deduped.values())
+    urls = list(deduped.keys())
+
     chunk = sorted([{"page_url": item.url, "page_content": item.content} for item in page_batch], key=lambda x: x['page_url'])
 
     in_stmt = insert(Page).on_conflict_do_update(index_elements=["page_url"], set_={"page_content": insert(Page).excluded.page_content})
@@ -208,17 +220,18 @@ async def add_batch(session_maker, page_batch, max_params):
     for item in inserted_pages:
         url_to_id[item[1]] = item[0] 
 
+    t1 = time.perf_counter()
+
     # add outlinks
     outlink_to_id = {}
     outlinks = []
     for item in page_batch:
         outlinks.extend(item.outlinks)
-    outlinks = list(set(outlinks))
+    outlinks = {outlink for outlink in outlinks}
 
     outlink_inserts = sorted([{"page_url": url} for url in outlinks], key=lambda x: x['page_url'])
     outlink_insert_statement = insert(Page).on_conflict_do_nothing()
     
-
     outlink_ids = []
     while outlink_inserts:
         length = min(max_params, len(outlink_inserts))
@@ -232,15 +245,13 @@ async def add_batch(session_maker, page_batch, max_params):
     for item in outlink_ids:
         outlink_to_id[item[1]] = item[0]
 
+    t2 = time.perf_counter()
+
     # add page <-> outlink links
     outlink_connection_inserts = []
     for item in page_batch:
         page_id = url_to_id[item.url]
         item_outlinks = item.outlinks
-
-        missing = [url for url in item_outlinks if url not in outlink_to_id]
-        if missing:
-            print(f"\nMissing outlink ids: {len(missing)}\n")
 
         inserts = [{"source_page_id": page_id, "outgoing_page_id" : outlink_to_id[outlink]} for outlink in item_outlinks]
         outlink_connection_inserts.extend(inserts)
@@ -250,13 +261,26 @@ async def add_batch(session_maker, page_batch, max_params):
     while outlink_connection_inserts:
         length = min(max_params, len(outlink_connection_inserts))
         chunk, outlink_connection_inserts = outlink_connection_inserts[:length], outlink_connection_inserts[length:]
+        j = time.perf_counter()
         await run_transaction_safely(session_maker, transaction_func=insert_links, args=[in_stmt, chunk])
+        print(f"Tiok {time.perf_counter() - j}")
+
+    t3 = time.perf_counter()
+    total = t3 - t
+
+    async with session_maker() as session:
+        stmt = select(func.count()).select_from(Page).where(Page.page_content != None)
+        result = await session.execute(stmt)
+
+    print(f"Took {t1 - t} for initial inserts, {t2 - t1} for outlink inserts, and {t3 - t2} for relationship inserts")
+    print(f"{(t1 - t) / total} {(t2 - t1) / total} {(t3 - t2) / total}")
+    print(result.all())
     
     return total_sucessful_inserts
 
 
 async def insert_pages(session, stmt, chunk, urls):
-    await session.execute(stmt, chunk)
+    pages = await session.execute(stmt, chunk)
     await session.commit()
     result = await session.execute(select(Page.page_id, Page.page_url).where(Page.page_url.in_(urls)))
     return result.all()
@@ -367,3 +391,4 @@ async def retrieve_term_pages(session, term_str):
 
     return items
 
+ 

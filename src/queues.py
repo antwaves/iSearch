@@ -34,9 +34,9 @@ class queue:
 
 class jqueue:
     def __init__(self):
-        self.queue = janus.Queue(maxsize=500) #i have no idea why im using this
+        self.queue = janus.Queue(maxsize=500) #i have no idea why im using janus
     
-    async def put(self, item: str) -> None:
+    async def put(self, item) -> None:
         await self.queue.async_q.put(item)
 
     async def get(self):
@@ -54,6 +54,9 @@ class jqueue:
 
     def empty(self) -> bool:
         return self.queue.async_q.empty()
+
+    def __contains__(self, item):
+        return item in self.queue
 
 
 class sized_set:
@@ -91,13 +94,17 @@ class unique_queue:
     def __init__(self):
         self.queue = asyncio.Queue(maxsize=5000)
         self.shuffle_queue = deque(maxlen=5000)
-        self.seen_pages = sized_set(5000)
+        self.seen_pages = sized_set(10000)
     
 
-    def put(self, item: str) -> None:
-        if item not in self.seen_pages:
-            self.seen_pages.add(item)
-            self.shuffle_queue.append(item)
+    def put(self, item) -> None: # assume item is iterable
+        dedupe = []
+        for obj in item:
+            if obj not in self.seen_pages:
+                dedupe.append(obj)
+
+        if dedupe:
+            self.shuffle_queue.append(tuple(dedupe))
     
 
     async def get(self) -> None:
