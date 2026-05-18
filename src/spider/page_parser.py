@@ -42,11 +42,12 @@ class parser:
     async def add_page_to_db(self, page_info):
         try:
             text, outlinks = await self.run_parse_page(page_info)
-        
+
             if not text:
                 return    
 
-            batches = [tuple(outlinks[i : i + self.batch_size]) for i in range(0, len(outlinks), self.batch_size)]  #some bullshit to batch the list
+            cleaned_outlinks = [link for link in outlinks if link not in self.link_queue.seen_pages]
+            batches = [tuple(cleaned_outlinks[i : i + self.batch_size]) for i in range(0, len(outlinks), self.batch_size)]  #some bullshit to batch the list
             for batch in batches:
                 self.link_queue.put(batch)
 

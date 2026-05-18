@@ -94,7 +94,7 @@ class unique_queue:
     def __init__(self):
         self.queue = asyncio.Queue(maxsize=5000)
         self.shuffle_queue = deque(maxlen=5000)
-        self.seen_pages = sized_set(10000)
+        self.seen_pages = sized_set(25000)
     
 
     def put(self, item) -> None: # assume item is iterable

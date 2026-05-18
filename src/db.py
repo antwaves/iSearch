@@ -167,9 +167,6 @@ class database_handler:
                 
                 if batch_to_add:
                     t = time.perf_counter()
-                    with open("test.txt", "a") as f:
-                        for item in batch_to_add:
-                            f.write(item.url + "\n")
                     inserts = await add_batch(self.session_maker, batch_to_add, self.max_params)
                     self.added += inserts
                     print(f"\x1b[102mTook {time.perf_counter() - t} to add {inserts} pages to db. {self.added} total added. \x1b[0m")
@@ -263,7 +260,7 @@ async def add_batch(session_maker, page_batch, max_params):
         chunk, outlink_connection_inserts = outlink_connection_inserts[:length], outlink_connection_inserts[length:]
         j = time.perf_counter()
         await run_transaction_safely(session_maker, transaction_func=insert_links, args=[in_stmt, chunk])
-        print(f"Tiok {time.perf_counter() - j}")
+        print(f"Took {time.perf_counter() - j} to add page relationship batch")
 
     t3 = time.perf_counter()
     total = t3 - t
